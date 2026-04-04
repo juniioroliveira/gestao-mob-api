@@ -28,12 +28,10 @@ exports.getHomeData = async (req, res) => {
             if (acc.type === 'CREDIT') {
                 // Cartão de crédito geralmente tem saldo negativo, mas por segurança somamos o absoluto
                 creditCardDebt += Math.abs(acc.current_balance);
+            } else if (acc.type === 'INVESTMENT') {
+                totalInvestments += acc.current_balance;
             } else {
                 totalBalance += acc.current_balance;
-            }
-
-            if (acc.type === 'INVESTMENT') {
-                totalInvestments += acc.current_balance;
             }
         });
 
