@@ -98,3 +98,25 @@ exports.updateProfile = (req, res) => {
         res.json({ message: 'Perfil atualizado com sucesso!' });
     });
 };
+
+exports.updateFamily = (req, res) => {
+    const familyId = req.user.family_id;
+    const { familyName } = req.body;
+
+    if (!familyName) {
+        return res.status(400).json({ error: 'Nome da família é obrigatório.' });
+    }
+
+    const query = `UPDATE families SET name = ? WHERE id = ?`;
+
+    db.run(query, [familyName, familyId], function(err) {
+        if (err) {
+            console.error('Erro ao atualizar família:', err);
+            return res.status(500).json({ error: 'Erro interno no servidor' });
+        }
+
+        getIo().to(`family_${familyId}`).emit('data_updated', { source: 'family', action: 'updated' });
+
+        res.json({ message: 'Família atualizada com sucesso!' });
+    });
+};

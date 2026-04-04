@@ -54,9 +54,11 @@ exports.login = (req, res) => {
 exports.register = (req, res) => {
     const { name, email, password, familyName } = req.body;
 
-    if (!name || !email || !password || !familyName) {
-        return res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
+    if (!name || !email || !password) {
+        return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios.' });
     }
+
+    const finalFamilyName = familyName || `Família de ${name.split(' ')[0]}`;
 
     // Verifica se o email já existe
     db.get(`SELECT id FROM members WHERE email = ?`, [email], (err, existingUser) => {
@@ -64,7 +66,7 @@ exports.register = (req, res) => {
         if (existingUser) return res.status(400).json({ error: 'Este e-mail já está em uso.' });
 
         // Cria a família
-        db.run(`INSERT INTO families (name) VALUES (?)`, [familyName], function (err) {
+        db.run(`INSERT INTO families (name) VALUES (?)`, [finalFamilyName], function (err) {
             if (err) return res.status(500).json({ error: 'Erro ao criar família.' });
             
             const familyId = this.lastID;
