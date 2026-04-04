@@ -50,3 +50,79 @@ exports.login = (req, res) => {
         });
     });
 };
+
+exports.register = (req, res) => {
+    const { name, email, password, familyName } = req.body;
+
+    if (!name || !email || !password || !familyName) {
+        return res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
+    }
+
+    // Verifica se o email já existe
+    db.get(`SELECT id FROM members WHERE email = ?`, [email], (err, existingUser) => {
+        if (err) return res.status(500).json({ error: 'Erro ao verificar email.' });
+        if (existingUser) return res.status(400).json({ error: 'Este e-mail já está em uso.' });
+
+        // Cria a família
+        db.run(`INSERT INTO families (name) VALUES (?)`, [familyName], function (err) {
+            if (err) return res.status(500).json({ error: 'Erro ao criar família.' });
+            
+            const familyId = this.lastID;
+            const hashedPassword = bcrypt.hashSync(password, 10);
+
+            // Cria o usuário como admin da família
+            db.run(`
+                INSERT INTO members (family_id, name, email, password_hash, role, is_admin)
+                VALUES (?, ?, ?, ?, 'ADMIN', 1)
+            `, [familyId, name, email, hashedPassword], function (err) {
+                if (err) return res.status(500).json({ error: 'Erro ao criar usuário.' });
+
+                const userId = this.lastID;
+                
+                // Cria uma conta inicial para não ficar vazio
+                db.run(`
+                    INSERT INTO accounts (family_id, member_id, name, type, bank_code, current_balance, credit_limit, is_credit_card, closing_day, due_day)
+                    VALUES (?, ?, ?, 'PERSONAL', '000', 0, 0, 0, null, null)
+                `, [familyId, userId, 'Conta Principal']);
+
+                // Criar algumas categorias padrão
+                const defaultCategories = [
+                    ['Supermercado', 'shopping_cart', '#FF5722'],
+                    ['Salário', 'attach_money', '#4CAF50'],
+                    ['Lazer', 'sports_esports', '#2196F3'],
+                    ['Moradia', 'home', '#9C27B0'],
+                    ['Transporte', 'directions_car', '#FF9800']
+                ];
+                
+                const stmt = db.prepare('INSERT INTO categories (family_id, name, icon, color_hex) VALUES (?, ?, ?, ?)');
+                defaultCategories.forEach(cat => {
+                    stmt.run(familyId, cat[0], cat[1], cat[2]);
+                });
+                stmt.finalize();
+
+                // Gera token para login automático
+                const payload = {
+                    id: userId,
+                    family_id: familyId,
+                    role: 'ADMIN',
+                    is_admin: 1
+                };
+                
+                const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+
+                res.status(201).json({
+                    message: 'Conta criada com sucesso!',
+                    token: token,
+                    user: {
+                        id: userId,
+                        family_id: familyId,
+                        name: name,
+                        email: email,
+                        role: 'ADMIN',
+                        is_admin: 1
+                    }
+                });
+            });
+        });
+    });
+};
