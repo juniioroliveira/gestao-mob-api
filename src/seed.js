@@ -15,7 +15,7 @@ db.serialize(() => {
     const tables = [
         'transactions', 'recurring_bills', 'category_budgets',
         'categories', 'accounts', 'members', 'families'
-    ];
+    ]; 
 
     tables.forEach(table => {
         db.run(`DELETE FROM ${table}`);
