@@ -120,3 +120,26 @@ exports.updateFamily = (req, res) => {
         res.json({ message: 'Família atualizada com sucesso!' });
     });
 };
+
+exports.updateAvatar = (req, res) => {
+    const userId = req.user.id;
+    const familyId = req.user.family_id;
+    const { avatarBase64 } = req.body;
+
+    if (!avatarBase64) {
+        return res.status(400).json({ error: 'Imagem não fornecida.' });
+    }
+
+    const query = `UPDATE members SET avatar_url = ? WHERE id = ?`;
+
+    db.run(query, [avatarBase64, userId], function(err) {
+        if (err) {
+            console.error('Erro ao atualizar avatar:', err);
+            return res.status(500).json({ error: 'Erro interno no servidor' });
+        }
+
+        getIo().to(`family_${familyId}`).emit('data_updated', { source: 'profile', action: 'updated' });
+
+        res.json({ message: 'Avatar atualizado com sucesso!' });
+    });
+};

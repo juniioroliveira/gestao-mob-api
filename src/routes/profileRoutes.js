@@ -5,6 +5,7 @@ const authenticateToken = require('../middlewares/authMiddleware');
 
 router.get('/', authenticateToken, profileController.getProfile);
 router.put('/', authenticateToken, profileController.updateProfile);
+router.put('/avatar', authenticateToken, profileController.updateAvatar);
 router.put('/preferences', authenticateToken, profileController.updatePreferences);
 router.put('/family', authenticateToken, profileController.updateFamily);
 
