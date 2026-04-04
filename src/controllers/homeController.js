@@ -67,7 +67,7 @@ exports.getHomeData = async (req, res) => {
 
         // 3. Membros da Família
         const membersRaw = await queryPromise(
-            `SELECT id, family_id, name, avatar_url, role, is_admin, monthly_income FROM members WHERE family_id = ?`,
+            `SELECT id, family_id, name, avatar_url, role, is_admin, monthly_income, salary_day, advance_value, advance_day FROM members WHERE family_id = ?`,
             [familyId]
         );
 
@@ -102,6 +102,13 @@ exports.getHomeData = async (req, res) => {
             [familyId]
         );
 
+        // 7. Total de Contas Fixas Recorrentes (Ativas)
+        const [recurringTotals] = await queryPromise(
+            `SELECT SUM(amount) as total FROM recurring_bills WHERE family_id = ? AND is_active = 1`,
+            [familyId]
+        );
+        const fixedExpensesTotal = recurringTotals.total || 0;
+
         res.status(200).json({
             user: currentUser,
             familyName: familyInfo ? familyInfo.name : 'Minha Família',
@@ -110,6 +117,7 @@ exports.getHomeData = async (req, res) => {
             accounts,
             income,
             expense,
+            fixedExpensesTotal,
             categoryExpenses,
             members,
             recentTransactions

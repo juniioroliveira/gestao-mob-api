@@ -50,6 +50,9 @@ function initDb() {
             is_admin INTEGER DEFAULT 0,
             avatar_url TEXT,
             monthly_income REAL DEFAULT 0.00,
+            salary_day INTEGER DEFAULT 5,
+            advance_value REAL DEFAULT 0.00,
+            advance_day INTEGER DEFAULT 20,
             pref_budget_alerts INTEGER DEFAULT 1,
             pref_bill_reminders INTEGER DEFAULT 1,
             pref_ai_processing INTEGER DEFAULT 1,
@@ -58,7 +61,12 @@ function initDb() {
             pref_hide_balances INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (family_id) REFERENCES families(id) ON DELETE CASCADE
-        )`);
+        )`, () => {
+            // Migrations para adicionar novas colunas em bancos existentes
+            db.run("ALTER TABLE members ADD COLUMN salary_day INTEGER DEFAULT 5", () => {});
+            db.run("ALTER TABLE members ADD COLUMN advance_value REAL DEFAULT 0.00", () => {});
+            db.run("ALTER TABLE members ADD COLUMN advance_day INTEGER DEFAULT 20", () => {});
+        });
 
         // 3. Contas (Wallets)
         db.run(`CREATE TABLE IF NOT EXISTS accounts (

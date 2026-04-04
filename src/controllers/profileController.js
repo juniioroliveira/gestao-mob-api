@@ -6,6 +6,7 @@ exports.getProfile = (req, res) => {
 
     const query = `
         SELECT m.id, m.name, m.email, m.role, m.is_admin, m.avatar_url, m.monthly_income,
+               m.salary_day, m.advance_value, m.advance_day,
                f.name as family_name,
                m.pref_budget_alerts, m.pref_bill_reminders, m.pref_ai_processing,
                m.pref_weekly_summary, m.pref_use_biometrics, m.pref_hide_balances
@@ -29,6 +30,9 @@ exports.getProfile = (req, res) => {
             avatarUrl: row.avatar_url,
             familyName: row.family_name,
             monthlyIncome: row.monthly_income,
+            salaryDay: row.salary_day,
+            advanceValue: row.advance_value,
+            advanceDay: row.advance_day,
             preferences: {
                 budgetAlerts: Boolean(row.pref_budget_alerts),
                 billReminders: Boolean(row.pref_bill_reminders),
@@ -76,18 +80,30 @@ exports.updatePreferences = (req, res) => {
 exports.updateProfile = (req, res) => {
     const userId = req.user.id;
     const familyId = req.user.family_id;
-    const { name, email, role, monthlyIncome } = req.body;
+    const { name, email, role, monthlyIncome, salaryDay, advanceValue, advanceDay } = req.body;
 
     const query = `
         UPDATE members SET 
             name = ?,
             email = ?,
             role = ?,
-            monthly_income = ?
+            monthly_income = ?,
+            salary_day = ?,
+            advance_value = ?,
+            advance_day = ?
         WHERE id = ?
     `;
 
-    db.run(query, [name, email, role, monthlyIncome, userId], function(err) {
+    db.run(query, [
+        name, 
+        email, 
+        role, 
+        monthlyIncome, 
+        salaryDay || 5, 
+        advanceValue || 0, 
+        advanceDay || 20, 
+        userId
+    ], function(err) {
         if (err) {
             console.error('Erro ao atualizar perfil:', err);
             return res.status(500).json({ error: 'Erro interno no servidor' });
