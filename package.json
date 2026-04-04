@@ -5,8 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "build": "git add -A && git diff --cached --quiet || (git commit -m \"chore(build): auto-commit\" && git push)"
+    "dev": "nodemon src/index.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
