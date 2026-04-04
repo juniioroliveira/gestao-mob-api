@@ -14,7 +14,8 @@ const server = http.createServer(app);
 
 // Middlewares Globais
 app.use(cors());
-app.use(express.json()); // Permite ler o body das requisições como JSON
+app.use(express.json({ limit: '50mb' })); // Aumentado para suportar imagens base64
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Rotas do Aplicativo
 const authRoutes = require('./routes/authRoutes');
