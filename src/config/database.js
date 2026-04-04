@@ -1,7 +1,25 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 
 const dbPath = path.resolve(__dirname, '../../database.sqlite');
+const homologDbPath = path.resolve(__dirname, '../../database_homolog.sqlite');
+
+// [MIGRATION EXCEPCIONAL] Recuperação do banco de dados de Produção
+// Como o banco de produção pode ter sido apagado, nós verificamos o tamanho dele.
+// Se estiver vazio (tamanho pequeno, < 40KB), nós copiamos a sua versão de homologação com todos os dados.
+try {
+    const dbExists = fs.existsSync(dbPath);
+    const dbSize = dbExists ? fs.statSync(dbPath).size : 0;
+    
+    if (dbSize < 40000 && fs.existsSync(homologDbPath)) {
+        console.log('⚠️ Banco de dados atual parece estar vazio. Restaurando os seus dados (Homologação -> Produção)...');
+        fs.copyFileSync(homologDbPath, dbPath);
+        console.log('✅ Banco de dados restaurado com sucesso!');
+    }
+} catch (err) {
+    console.error('Erro ao tentar restaurar o banco de dados:', err);
+}
 
 const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
