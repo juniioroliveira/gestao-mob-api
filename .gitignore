@@ -1,6 +1,7 @@
 node_modules/
 database.sqlite
 database.sqlite-journal
+database_homolog.sqlite
 .env
 .DS_Store
 *.log
