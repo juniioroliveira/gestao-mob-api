@@ -55,10 +55,10 @@ exports.getStatisticsData = (req, res) => {
         // Buscar histórico de transações do mês
         const transactionsQuery = `
             SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
-                   m.name as member_name, a.name as account_name, 
+                   t.account_id, t.destination_account_id, t.category_id, t.member_id,
+                   a.name as account_name, 
                    c.icon, c.color_hex 
             FROM transactions t 
-            JOIN members m ON t.member_id = m.id 
             JOIN accounts a ON t.account_id = a.id 
             LEFT JOIN categories c ON t.category_id = c.id 
             WHERE a.family_id = ? 
@@ -73,23 +73,48 @@ exports.getStatisticsData = (req, res) => {
                 return res.status(500).json({ error: 'Erro interno no servidor' });
             }
 
-            // Buscar receita total do mês baseada na previsão de renda dos membros da família
-            const incomeQuery = `
-                SELECT COALESCE(SUM(monthly_income), 0) as totalIncome
-                FROM members
-                WHERE family_id = ?
-            `;
-            db.get(incomeQuery, [familyId], (err3, incomeRow) => {
-                if (err3) {
-                    console.error('Erro ao buscar receitas na estatística:', err3);
-                    return res.status(500).json({ error: 'Erro interno no servidor' });
-                }
+            // Precisamos buscar os membros para mapear os nomes
+            db.all(`SELECT id, name FROM members WHERE family_id = ?`, [familyId], (err4, membersRows) => {
+                const members = membersRows || [];
+                const finalTransactions = transactionsRows.map(t => {
+                    let memberName = 'Desconhecido';
+                    try {
+                        const memIds = JSON.parse(t.member_id);
+                        if (Array.isArray(memIds)) {
+                            const names = memIds.map(id => {
+                                const m = members.find(mem => mem.id === id);
+                                return m ? m.name.split(' ')[0] : '';
+                            }).filter(Boolean);
+                            memberName = names.length > 1 ? names.join(', ') : (names[0] || 'Desconhecido');
+                        } else {
+                            const m = members.find(mem => mem.id === memIds);
+                            memberName = m ? m.name : 'Desconhecido';
+                        }
+                    } catch (e) {
+                        const m = members.find(mem => mem.id === t.member_id);
+                        memberName = m ? m.name : 'Desconhecido';
+                    }
+                    return { ...t, member_name: memberName };
+                });
 
-                res.json({
-                    totalExpense,
-                    totalIncome: incomeRow ? incomeRow.totalIncome : 0,
-                    categories,
-                    transactions: transactionsRows
+                // Buscar receita total do mês baseada na previsão de renda dos membros da família
+                const incomeQuery = `
+                    SELECT COALESCE(SUM(monthly_income), 0) as totalIncome
+                    FROM members
+                    WHERE family_id = ?
+                `;
+                db.get(incomeQuery, [familyId], (err3, incomeRow) => {
+                    if (err3) {
+                        console.error('Erro ao buscar receitas na estatística:', err3);
+                        return res.status(500).json({ error: 'Erro interno no servidor' });
+                    }
+
+                    res.json({
+                        totalExpense,
+                        totalIncome: incomeRow ? incomeRow.totalIncome : 0,
+                        categories,
+                        transactions: finalTransactions
+                    });
                 });
             });
         });

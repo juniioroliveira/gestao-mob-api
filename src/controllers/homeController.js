@@ -82,18 +82,44 @@ exports.getHomeData = async (req, res) => {
         }));
 
         // 4. Últimas Transações
-        const recentTransactions = await queryPromise(
+        const rawRecentTransactions = await queryPromise(
             `SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
-                    m.name as member_name, a.name as account_name, 
-                    c.icon, c.color_hex 
+                    t.account_id, t.destination_account_id, t.category_id, t.member_id,
+                    a.name as account_name, 
+                    c.name as category_name, c.icon, c.color_hex 
              FROM transactions t 
-             JOIN members m ON t.member_id = m.id 
              JOIN accounts a ON t.account_id = a.id 
              LEFT JOIN categories c ON t.category_id = c.id 
              WHERE a.family_id = ? 
              ORDER BY t.transaction_date DESC, t.id DESC LIMIT 4`,
             [familyId]
         );
+
+        // Mapear os membros para as transações (suportando array de IDs)
+        const recentTransactions = rawRecentTransactions.map(t => {
+            let memberName = 'Desconhecido';
+            try {
+                const memIds = JSON.parse(t.member_id);
+                if (Array.isArray(memIds)) {
+                    const names = memIds.map(id => {
+                        const m = members.find(mem => mem.id === id);
+                        return m ? m.name.split(' ')[0] : '';
+                    }).filter(Boolean);
+                    memberName = names.length > 1 ? names.join(', ') : (names[0] || 'Desconhecido');
+                } else {
+                    const m = members.find(mem => mem.id === memIds);
+                    memberName = m ? m.name : 'Desconhecido';
+                }
+            } catch (e) {
+                // Caso seja INT simples (legado)
+                const m = members.find(mem => mem.id === t.member_id);
+                memberName = m ? m.name : 'Desconhecido';
+            }
+            return {
+                ...t,
+                member_name: memberName
+            };
+        });
 
         // 5. Dados do Usuário Atual
         const [currentUser] = await queryPromise(

@@ -161,7 +161,7 @@ function initDb() {
         db.run(`CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_id INTEGER NOT NULL,
-            member_id INTEGER NOT NULL,
+            member_id TEXT NOT NULL,
             category_id INTEGER,
             destination_account_id INTEGER,
             recurring_bill_id INTEGER,
@@ -173,11 +173,33 @@ function initDb() {
             is_ai_processed INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
             FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
             FOREIGN KEY (recurring_bill_id) REFERENCES recurring_bills(id) ON DELETE SET NULL,
             FOREIGN KEY (destination_account_id) REFERENCES accounts(id) ON DELETE CASCADE
-        )`);
+        )`, () => {
+            // MIGRATION AUTOMÁTICA: Remover a Foreign Key do member_id na tabela existente
+            // No SQLite, a única forma de remover FK ou alterar tipo é recriando a tabela.
+            db.all("PRAGMA table_info(transactions)", (err, rows) => {
+                if (!err && rows) {
+                    const memberIdCol = rows.find(r => r.name === 'member_id');
+                    // Se a coluna ainda for INTEGER, faz a migração
+                    if (memberIdCol && memberIdCol.type === 'INTEGER') {
+                        console.log('🔄 Executando Migration Automática: Alterando member_id para TEXT em transactions...');
+                        db.serialize(() => {
+                            db.run("BEGIN TRANSACTION");
+                            db.run("CREATE TABLE transactions_new (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, member_id TEXT NOT NULL, category_id INTEGER, destination_account_id INTEGER, recurring_bill_id INTEGER, amount REAL NOT NULL, type TEXT CHECK(type IN ('INCOME', 'EXPENSE', 'TRANSFER')) NOT NULL, description TEXT NOT NULL, transaction_date DATE NOT NULL, attachment_url TEXT, is_ai_processed INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT, FOREIGN KEY (recurring_bill_id) REFERENCES recurring_bills(id) ON DELETE SET NULL, FOREIGN KEY (destination_account_id) REFERENCES accounts(id) ON DELETE CASCADE)");
+                            db.run("INSERT INTO transactions_new SELECT * FROM transactions");
+                            db.run("DROP TABLE transactions");
+                            db.run("ALTER TABLE transactions_new RENAME TO transactions");
+                            db.run("COMMIT", (err) => {
+                                if (err) console.error("❌ Falha na migration de transactions:", err);
+                                else console.log("✅ Migration de transactions concluída com sucesso!");
+                            });
+                        });
+                    }
+                }
+            });
+        });
         
         console.log('✅ Tabelas SQLite sincronizadas com sucesso.');
     });

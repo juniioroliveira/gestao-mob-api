@@ -18,6 +18,7 @@ app.use(express.json({ limit: '50mb' })); // Aumentado para suportar imagens bas
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Rotas do Aplicativo
+const testRoutes = require('./routes/testRoutes');
 const authRoutes = require('./routes/authRoutes');
 const homeRoutes = require('./routes/homeRoutes');
 const walletRoutes = require('./routes/walletRoutes');
@@ -30,6 +31,7 @@ const accountRoutes = require('./routes/accountRoutes');
 const bankRoutes = require('./routes/bankRoutes');
 
 // Registrando as Rotas
+app.use('/api/test', testRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/home', homeRoutes);
 app.use('/api/wallet', walletRoutes);

@@ -42,12 +42,12 @@ exports.createTransaction = async (req, res) => {
             }
         }
 
-        // Inserir a transação
+        // Inserir a transação (memberId agora vem como string JSON)
         const insertQuery = `
             INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
-        const result = await runQuery(insertQuery, [accountId, type === 'TRANSFER' ? destinationAccountId : null, memberId, type === 'TRANSFER' ? null : categoryId, amount, type, description, date, false]);
+        const result = await runQuery(insertQuery, [accountId, type === 'TRANSFER' ? destinationAccountId : null, JSON.stringify(req.body.memberId), type === 'TRANSFER' ? null : categoryId, amount, type, description, date, false]);
 
         // Atualizar saldos das contas
         if (type === 'EXPENSE') {
@@ -123,12 +123,13 @@ exports.updateTransaction = async (req, res) => {
         // 3. Atualizar a transação
         const updateQuery = `
             UPDATE transactions 
-            SET account_id = ?, destination_account_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?
+            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?
             WHERE id = ?
         `;
         await runQuery(updateQuery, [
             accountId, 
             type === 'TRANSFER' ? destinationAccountId : null, 
+            JSON.stringify(req.body.memberId),
             type === 'TRANSFER' ? null : categoryId, 
             amount, 
             type, 
