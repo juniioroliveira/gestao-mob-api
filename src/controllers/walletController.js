@@ -54,12 +54,12 @@ exports.getWalletData = (req, res) => {
                     };
                 });
 
-                // 4. Buscar transações do mês (apenas EXPENSE)
+                // 4. Buscar transações do mês (apenas EXPENSE e TRANSFER)
                 const queryTransactions = `
-                    SELECT t.amount, t.member_id, t.category_id 
+                    SELECT t.amount, t.member_id, t.category_id, t.type, a.type as account_type
                     FROM transactions t
                     JOIN accounts a ON t.account_id = a.id
-                    WHERE a.family_id = ? AND t.type = 'EXPENSE' AND strftime('%Y-%m', t.transaction_date) = ?
+                    WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'TRANSFER') AND strftime('%Y-%m', t.transaction_date) = ?
                 `;
 
                 db.all(queryTransactions, [familyId, monthStr], (err, transactions) => {
@@ -71,40 +71,43 @@ exports.getWalletData = (req, res) => {
                         const amount = t.amount;
                         const catId = t.category_id;
                         
-                        familyTotalExpenses += amount;
+                        // Filtramos apenas as despesas reais para não duplicar com as transferências (pagamentos de fatura de cartão)
+                        if (t.type === 'EXPENSE') {
+                            familyTotalExpenses += amount;
 
-                        // Atualiza o gasto total da família na categoria
-                        if (catId && categoryBudgets[catId]) {
-                            categoryBudgets[catId].familyTotalSpent += amount;
-                        }
+                            // Atualiza o gasto total da família na categoria
+                            if (catId && categoryBudgets[catId]) {
+                                categoryBudgets[catId].familyTotalSpent += amount;
+                            }
 
-                        // Rateio do gasto entre os membros responsáveis
-                        let owners = [];
-                        try {
-                            const parsed = JSON.parse(t.member_id);
-                            if (Array.isArray(parsed)) owners = parsed;
-                            else owners = [parsed];
-                        } catch (e) {
-                            if (t.member_id) owners = [parseInt(t.member_id)];
-                        }
+                            // Rateio do gasto entre os membros responsáveis
+                            let owners = [];
+                            try {
+                                const parsed = JSON.parse(t.member_id);
+                                if (Array.isArray(parsed)) owners = parsed;
+                                else owners = [parsed];
+                            } catch (e) {
+                                if (t.member_id) owners = [parseInt(t.member_id)];
+                            }
 
-                        if (owners.length > 0) {
-                            const share = amount / owners.length;
-                            owners.forEach(owner => {
-                                if (owner && membersMap[owner]) {
-                                    membersMap[owner].totalSpent += share;
-                                    
-                                    if (catId && categoryBudgets[catId]) {
-                                        if (!membersMap[owner].categoriesMap[catId]) {
-                                            membersMap[owner].categoriesMap[catId] = {
-                                                ...categoryBudgets[catId], // Copia info da categoria
-                                                memberSpent: 0
-                                            };
+                            if (owners.length > 0) {
+                                const share = amount / owners.length;
+                                owners.forEach(owner => {
+                                    if (owner && membersMap[owner]) {
+                                        membersMap[owner].totalSpent += share;
+                                        
+                                        if (catId && categoryBudgets[catId]) {
+                                            if (!membersMap[owner].categoriesMap[catId]) {
+                                                membersMap[owner].categoriesMap[catId] = {
+                                                    ...categoryBudgets[catId], // Copia info da categoria
+                                                    memberSpent: 0
+                                                };
+                                            }
+                                            membersMap[owner].categoriesMap[catId].memberSpent += share;
                                         }
-                                        membersMap[owner].categoriesMap[catId].memberSpent += share;
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                     });
 
