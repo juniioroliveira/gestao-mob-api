@@ -88,10 +88,23 @@ exports.forceSeed = (req, res) => {
 };
 
 exports.debugDb = (req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+    const seedPath = path.resolve(__dirname, '../../database_seed.sqlite');
+    const dbPath = path.resolve(__dirname, '../../database.sqlite');
+    
+    let seedSize = -1;
+    let dbSize = -1;
+    try { seedSize = fs.statSync(seedPath).size; } catch(e){}
+    try { dbSize = fs.statSync(dbPath).size; } catch(e){}
+    
     const db = require('../config/database');
     db.all("SELECT id, email, password_hash FROM members", (err, rows) => {
-        if (err) res.status(500).json({error: err.message});
-        else res.json(rows);
+        res.json({
+            seedSize,
+            dbSize,
+            rows: rows || err.message
+        });
     });
 };
 
