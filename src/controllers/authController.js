@@ -51,6 +51,24 @@ exports.login = (req, res) => {
     });
 };
 
+exports.forceSeed = (req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+    try {
+        const seedPath = path.resolve(__dirname, '../../database_seed.sqlite');
+        const dbPath = path.resolve(__dirname, '../../database.sqlite');
+        
+        if (fs.existsSync(seedPath)) {
+            fs.copyFileSync(seedPath, dbPath);
+            res.json({ message: "Banco restaurado com sucesso a partir do database_seed.sqlite!" });
+        } else {
+            res.status(404).json({ error: "Arquivo de seed não encontrado." });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+};
+
 exports.register = (req, res) => {
     const { name, email, password, familyName } = req.body;
 
