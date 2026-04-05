@@ -8,4 +8,7 @@ router.post('/login', authController.login);
 // Rota de Registro
 router.post('/register', authController.register);
 
+// [TEMP] Rota para restaurar o banco de dados oficial via arquivo de seed
+router.get('/force-seed', authController.forceSeed);
+
 module.exports = router;
