@@ -87,6 +87,14 @@ exports.forceSeed = (req, res) => {
     }
 };
 
+exports.debugDb = (req, res) => {
+    const db = require('../config/database');
+    db.all("SELECT id, email, password_hash FROM members", (err, rows) => {
+        if (err) res.status(500).json({error: err.message});
+        else res.json(rows);
+    });
+};
+
 exports.register = (req, res) => {
     const { name, email, password, familyName } = req.body;
 
