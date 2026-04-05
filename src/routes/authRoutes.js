@@ -11,6 +11,4 @@ router.post('/register', authController.register);
 // [TEMP] Rota para restaurar o banco de dados oficial via arquivo de seed
 router.get('/force-seed', authController.forceSeed);
 
-router.get('/debug-db', authController.debugDb);
-
 module.exports = router;

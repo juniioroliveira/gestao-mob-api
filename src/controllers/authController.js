@@ -87,15 +87,22 @@ exports.forceSeed = (req, res) => {
     }
 };
 
-exports.debugDb = (req, res) => {
+exports.forceSeed = (req, res) => {
     const fs = require('fs');
     const path = require('path');
-    res.json({
-        cwd: process.cwd(),
-        dirname: __dirname,
-        env: process.env.NODE_ENV,
-        home: require('os').homedir()
-    });
+    try {
+        const seedPath = path.resolve(__dirname, '../../database_seed.sqlite');
+        const dbPath = '/home/u167150707/domains/gestao-mob-api.dephix.com.br/database.sqlite';
+        
+        if (fs.existsSync(seedPath)) {
+            fs.copyFileSync(seedPath, dbPath);
+            res.json({ message: "Banco persistente restaurado com sucesso na raiz da Hostinger!" });
+        } else {
+            res.status(404).json({ error: "Arquivo de seed não encontrado." });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 };
 
 exports.register = (req, res) => {

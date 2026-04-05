@@ -2,7 +2,13 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 
-const dbPath = path.resolve(__dirname, '../../database.sqlite');
+// Se estiver na Hostinger (produção), salva o banco na pasta raiz do domínio (fora da pasta /nodejs que é apagada no deploy)
+let dbPath;
+if (process.env.NODE_ENV === 'production' || __dirname.includes('u167150707')) {
+    dbPath = '/home/u167150707/domains/gestao-mob-api.dephix.com.br/database.sqlite';
+} else {
+    dbPath = path.resolve(__dirname, '../../database.sqlite');
+}
 
 const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
