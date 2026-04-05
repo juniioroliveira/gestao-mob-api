@@ -35,10 +35,13 @@ exports.getWalletData = (req, res) => {
                         memberId: acc.member_id,
                         memberName: acc.member_name,
                         avatarUrl: acc.avatar_url,
-                        balance: 0
+                        balance: 0,
+                        personalBalance: 0,
+                        transactions: []
                     };
                 }
                 membersMap[acc.member_id].balance += acc.current_balance;
+                membersMap[acc.member_id].personalBalance += acc.current_balance;
             }
         });
 
@@ -51,7 +54,9 @@ exports.getWalletData = (req, res) => {
                             memberId: m.id,
                             memberName: m.name,
                             avatarUrl: m.avatar_url,
-                            balance: 0
+                            balance: 0,
+                            personalBalance: 0,
+                            transactions: []
                         };
                     }
                 });
@@ -59,7 +64,7 @@ exports.getWalletData = (req, res) => {
 
             // 2. Buscar todas as transações para aplicar o rateio
             const queryTransactions = `
-                SELECT t.amount, t.type, t.member_id, a.member_id as payer_id
+                SELECT t.id, t.description, t.transaction_date, t.amount, t.type, t.member_id, a.member_id as payer_id
                 FROM transactions t
                 JOIN accounts a ON t.account_id = a.id
                 WHERE a.family_id = ? AND t.type != 'TRANSFER'
@@ -94,12 +99,32 @@ exports.getWalletData = (req, res) => {
                             if (owner != payer_id) {
                                 if (t.type === 'EXPENSE') {
                                     // O responsável (owner) deve ao pagador (payer)
-                                    if (owner && membersMap[owner]) membersMap[owner].balance -= share;
-                                    if (payer_id && membersMap[payer_id]) membersMap[payer_id].balance += share;
+                                    if (owner && membersMap[owner]) {
+                                        membersMap[owner].balance -= share;
+                                        membersMap[owner].transactions.push({
+                                            id: t.id, description: t.description, date: t.transaction_date, amount: -share, detail: 'Sua parte na despesa'
+                                        });
+                                    }
+                                    if (payer_id && membersMap[payer_id]) {
+                                        membersMap[payer_id].balance += share;
+                                        membersMap[payer_id].transactions.push({
+                                            id: t.id, description: t.description, date: t.transaction_date, amount: share, detail: 'Pagou a parte de outro'
+                                        });
+                                    }
                                 } else if (t.type === 'INCOME') {
                                     // O pagador (payer) deve repassar a receita ao responsável (owner)
-                                    if (owner && membersMap[owner]) membersMap[owner].balance += share;
-                                    if (payer_id && membersMap[payer_id]) membersMap[payer_id].balance -= share;
+                                    if (owner && membersMap[owner]) {
+                                        membersMap[owner].balance += share;
+                                        membersMap[owner].transactions.push({
+                                            id: t.id, description: t.description, date: t.transaction_date, amount: share, detail: 'Sua parte na receita'
+                                        });
+                                    }
+                                    if (payer_id && membersMap[payer_id]) {
+                                        membersMap[payer_id].balance -= share;
+                                        membersMap[payer_id].transactions.push({
+                                            id: t.id, description: t.description, date: t.transaction_date, amount: -share, detail: 'Recebeu a parte de outro'
+                                        });
+                                    }
                                 }
                             }
                         });
