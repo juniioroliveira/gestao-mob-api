@@ -63,7 +63,7 @@ function initDb() {
             family_id INTEGER NOT NULL,
             member_id INTEGER,
             name TEXT NOT NULL,
-            type TEXT CHECK(type IN ('SHARED', 'PERSONAL', 'INVESTMENT')) NOT NULL,
+            type TEXT NOT NULL,
             current_balance REAL DEFAULT 0.00,
             bank_code TEXT,
             color_hex TEXT,

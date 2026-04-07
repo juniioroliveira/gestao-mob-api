@@ -71,9 +71,17 @@ exports.forceSeed = (req, res) => {
 
 exports.debugDb = (req, res) => {
     const db = require('../config/database');
-    db.run("UPDATE accounts SET type = 'INVESTMENT' WHERE name LIKE '%Reserva%'", function(err) {
-        if (err) return res.json({ error: err.message });
-        res.json({ updated: this.changes, message: "Contas de Reserva alteradas para INVESTMENT" });
+    db.serialize(() => {
+        db.run("CREATE TABLE accounts_new (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER NOT NULL, member_id INTEGER, name TEXT NOT NULL, type TEXT NOT NULL, current_balance REAL DEFAULT 0.00, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, bank_code TEXT, color_hex TEXT, card_last_digits TEXT, FOREIGN KEY (family_id) REFERENCES families(id) ON DELETE CASCADE, FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE SET NULL)");
+        db.run("INSERT INTO accounts_new SELECT id, family_id, member_id, name, type, current_balance, created_at, bank_code, color_hex, card_last_digits FROM accounts");
+        db.run("DROP TABLE accounts");
+        db.run("ALTER TABLE accounts_new RENAME TO accounts");
+        
+        // Também corrige os cartões de crédito para CREDIT
+        db.run("UPDATE accounts SET type = 'CREDIT' WHERE card_last_digits IS NOT NULL AND card_last_digits != '' AND type != 'CREDIT'", function(err) {
+            if (err) return res.json({ error: err.message });
+            res.json({ message: "Banco migrado com sucesso! Constraint de TYPE removida e cartões ajustados." });
+        });
     });
 };
 
