@@ -27,6 +27,7 @@ exports.getWalletData = (req, res) => {
                     avatarUrl: m.avatar_url,
                     monthlyIncome: m.monthly_income,
                     totalSpent: 0,
+                    individualSpent: 0,
                     categoriesMap: {}
                 };
             });
@@ -92,9 +93,14 @@ exports.getWalletData = (req, res) => {
 
                             if (owners.length > 0) {
                                 const share = amount / owners.length;
+                                const isIndividual = owners.length === 1;
+
                                 owners.forEach(owner => {
                                     if (owner && membersMap[owner]) {
                                         membersMap[owner].totalSpent += share;
+                                        if (isIndividual) {
+                                            membersMap[owner].individualSpent += share;
+                                        }
                                         
                                         if (catId && categoryBudgets[catId]) {
                                             if (!membersMap[owner].categoriesMap[catId]) {
@@ -128,6 +134,8 @@ exports.getWalletData = (req, res) => {
                             avatarUrl: m.avatarUrl,
                             monthlyIncome: m.monthlyIncome,
                             totalSpent: m.totalSpent,
+                            sharedSpent: m.totalSpent - m.individualSpent,
+                            individualSpent: m.individualSpent,
                             categories: memberCats
                         };
                     });
