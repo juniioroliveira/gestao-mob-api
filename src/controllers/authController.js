@@ -69,22 +69,12 @@ exports.forceSeed = (req, res) => {
     }
 };
 
-exports.forceSeed = (req, res) => {
-    const fs = require('fs');
-    const path = require('path');
-    try {
-        const seedPath = path.resolve(__dirname, '../../database_seed.sqlite');
-        const dbPath = path.resolve(__dirname, '../../database.sqlite');
-        
-        if (fs.existsSync(seedPath)) {
-            fs.copyFileSync(seedPath, dbPath);
-            res.json({ message: "Banco restaurado com sucesso a partir do database_seed.sqlite!" });
-        } else {
-            res.status(404).json({ error: "Arquivo de seed não encontrado." });
-        }
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+exports.debugDb = (req, res) => {
+    const db = require('../config/database');
+    db.run("UPDATE accounts SET type = 'INVESTMENT' WHERE name LIKE '%Reserva%'", function(err) {
+        if (err) return res.json({ error: err.message });
+        res.json({ updated: this.changes, message: "Contas de Reserva alteradas para INVESTMENT" });
+    });
 };
 
 exports.register = (req, res) => {

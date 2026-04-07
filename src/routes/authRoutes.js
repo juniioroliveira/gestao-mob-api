@@ -8,4 +8,6 @@ router.post('/login', authController.login);
 // Rota de Registro
 router.post('/register', authController.register);
 
+router.get('/debug-db', authController.debugDb);
+
 module.exports = router;
