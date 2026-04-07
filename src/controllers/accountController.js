@@ -26,6 +26,37 @@ exports.createAccount = (req, res) => {
     });
 };
 
+exports.updateAccount = (req, res) => {
+    const familyId = req.user.family_id;
+    const accountId = req.params.id;
+    const { name, type, bankCode, colorHex, lastDigits } = req.body;
+
+    if (!name) {
+        return res.status(400).json({ error: 'O nome da conta é obrigatório' });
+    }
+
+    db.get(`SELECT id FROM accounts WHERE id = ? AND family_id = ?`, [accountId, familyId], (err, row) => {
+        if (err || !row) {
+            return res.status(404).json({ error: 'Conta não encontrada ou sem permissão' });
+        }
+
+        const query = `UPDATE accounts SET name = ?, type = ?, bank_code = ?, color_hex = ?, card_last_digits = ? WHERE id = ?`;
+        db.run(query, [name, type || 'PERSONAL', bankCode || null, colorHex || null, lastDigits || null, accountId], function(errUpdate) {
+            if (errUpdate) {
+                console.error('Erro ao atualizar conta:', errUpdate);
+                return res.status(500).json({ error: 'Erro ao atualizar conta' });
+            }
+
+            getIo().to(`family_${familyId}`).emit('data_updated', {
+                source: 'accounts',
+                action: 'updated'
+            });
+
+            res.json({ message: 'Conta atualizada com sucesso' });
+        });
+    });
+};
+
 exports.deleteAccount = (req, res) => {
     const familyId = req.user.family_id;
     const accountId = req.params.id;
