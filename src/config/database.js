@@ -9,7 +9,8 @@ const config = {
     port: process.env.DB_PORT || 3306,
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+    decimalNumbers: true
 };
 
 const pool = mysql.createPool(config);
