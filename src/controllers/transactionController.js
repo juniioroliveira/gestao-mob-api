@@ -217,6 +217,7 @@ exports.deleteTransaction = (req, res) => {
                         });
                     });
                 }
+            });
         }
     );
 };
