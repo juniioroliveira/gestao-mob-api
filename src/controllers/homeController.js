@@ -16,7 +16,7 @@ exports.getHomeData = async (req, res) => {
 
         // 1. Contas e Saldos
         const accounts = await queryPromise(
-            `SELECT id, name, current_balance, type, bank_code, color_hex, card_last_digits FROM accounts WHERE family_id = ?`, 
+            `SELECT id, name, current_balance, type, bank_code, color_hex, card_last_digits, is_debit, is_credit FROM accounts WHERE family_id = ?`, 
             [familyId]
         );
         
@@ -84,7 +84,7 @@ exports.getHomeData = async (req, res) => {
         // 4. Últimas Transações
         const rawRecentTransactions = await queryPromise(
             `SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
-                    t.account_id, t.destination_account_id, t.category_id, t.member_id,
+                    t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type,
                     a.name as account_name, 
                     c.name as category_name, c.icon, c.color_hex 
              FROM transactions t 

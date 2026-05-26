@@ -11,7 +11,7 @@ const runQuery = (query, params) => {
 };
 
 exports.createTransaction = async (req, res) => {
-    const { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId } = req.body;
+    const { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType } = req.body;
     
     // Se o usuário não enviou o memberId ou não for admin, usa o próprio ID dele
     const memberId = reqMemberId || req.user.id;
@@ -29,6 +29,8 @@ exports.createTransaction = async (req, res) => {
         return res.status(400).json({ error: 'Conta de destino inválida para transferência' });
     }
 
+    const finalPaymentType = paymentType || 'DEBIT';
+
     try {
         // Validação de segurança extra no backend:
         // Se ele estiver tentando lançar em nome de outro membro, verificar se é admin
@@ -44,10 +46,10 @@ exports.createTransaction = async (req, res) => {
 
         // Inserir a transação (memberId agora vem como string JSON)
         const insertQuery = `
-            INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
-        const result = await runQuery(insertQuery, [accountId, type === 'TRANSFER' ? destinationAccountId : null, JSON.stringify(req.body.memberId), type === 'TRANSFER' ? null : categoryId, amount, type, description, date, false]);
+        const result = await runQuery(insertQuery, [accountId, type === 'TRANSFER' ? destinationAccountId : null, JSON.stringify(req.body.memberId), type === 'TRANSFER' ? null : categoryId, amount, type, description, date, false, finalPaymentType]);
 
         // Atualizar saldos das contas
         if (type === 'EXPENSE') {
@@ -80,7 +82,7 @@ exports.createTransaction = async (req, res) => {
 exports.updateTransaction = async (req, res) => {
     const transactionId = req.params.id;
     const familyId = req.user.family_id;
-    const { accountId, destinationAccountId, categoryId, amount, type, description, date } = req.body;
+    const { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType } = req.body;
 
     if (!accountId || !amount || !type || !description || !date) {
         return res.status(400).json({ error: 'Campos obrigatórios ausentes' });
@@ -93,6 +95,8 @@ exports.updateTransaction = async (req, res) => {
     if (type === 'TRANSFER' && (!destinationAccountId || accountId === destinationAccountId)) {
         return res.status(400).json({ error: 'Conta de destino inválida para transferência' });
     }
+
+    const finalPaymentType = paymentType || 'DEBIT';
 
     try {
         // 1. Pegar a transação antiga
@@ -123,7 +127,7 @@ exports.updateTransaction = async (req, res) => {
         // 3. Atualizar a transação
         const updateQuery = `
             UPDATE transactions 
-            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?
+            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?, payment_type = ?
             WHERE id = ?
         `;
         await runQuery(updateQuery, [
@@ -135,6 +139,7 @@ exports.updateTransaction = async (req, res) => {
             type, 
             description, 
             date, 
+            finalPaymentType,
             transactionId
         ]);
 

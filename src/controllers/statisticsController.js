@@ -55,7 +55,7 @@ exports.getStatisticsData = (req, res) => {
         // Buscar histórico de transações do mês
         const transactionsQuery = `
             SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
-                   t.account_id, t.destination_account_id, t.category_id, t.member_id,
+                   t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type,
                    a.name as account_name, 
                    c.icon, c.color_hex 
             FROM transactions t 
