@@ -217,7 +217,55 @@ exports.deleteTransaction = (req, res) => {
                         });
                     });
                 }
-            });
         }
     );
+};
+
+exports.clearTransactions = async (req, res) => {
+    const familyId = req.user.family_id;
+    
+    try {
+        // 1. Verificar se o usuário é administrador
+        const checkQuery = `SELECT is_admin FROM members WHERE id = ?`;
+        const row = await new Promise((resolve, reject) => {
+            db.get(checkQuery, [req.user.id], (err, res) => err ? reject(err) : resolve(res));
+        });
+        
+        if (!row || !row.is_admin) {
+            return res.status(403).json({ error: 'Apenas administradores podem limpar os lançamentos' });
+        }
+
+        // 2. Apagar todas as transações das contas pertencentes à família
+        const deleteQuery = `
+            DELETE FROM transactions 
+            WHERE account_id IN (SELECT id FROM accounts WHERE family_id = ?)
+        `;
+        await runQuery(deleteQuery, [familyId]);
+
+        // 3. Zerar o saldo de todas as contas da família
+        const updateQuery = `
+            UPDATE accounts 
+            SET current_balance = 0.00 
+            WHERE family_id = ?
+        `;
+        await runQuery(updateQuery, [familyId]);
+
+        // 4. Emitir evento WebSocket para atualizar a tela de todos da família
+        const io = getIo();
+        if (io) {
+            io.to(`family_${familyId}`).emit('data_updated', {
+                source: 'transactions',
+                action: 'cleared'
+            });
+            io.to(`family_${familyId}`).emit('data_updated', {
+                source: 'accounts',
+                action: 'updated'
+            });
+        }
+
+        res.json({ message: 'Todos os lançamentos foram limpos e os saldos foram zerados com sucesso' });
+    } catch (err) {
+        console.error('Erro ao limpar lançamentos:', err);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
 };
