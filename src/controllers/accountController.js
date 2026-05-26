@@ -4,7 +4,7 @@ const { getIo } = require('../websockets/socket');
 exports.createAccount = (req, res) => {
     const familyId = req.user.family_id;
     const memberId = req.user.id;
-    const { name, type, initialBalance, bankCode, colorHex, lastDigits, isDebit, isCredit } = req.body;
+    const { name, type, initialBalance, bankCode, colorHex, lastDigits, isDebit, isCredit, creditLimit } = req.body;
 
     if (!name) {
         return res.status(400).json({ error: 'O nome da conta é obrigatório' });
@@ -12,9 +12,10 @@ exports.createAccount = (req, res) => {
 
     const isDebitVal = (isDebit === undefined) ? 1 : (isDebit ? 1 : 0);
     const isCreditVal = (isCredit === undefined) ? 0 : (isCredit ? 1 : 0);
+    const creditLimitVal = creditLimit || 0;
 
-    const query = `INSERT INTO accounts (family_id, member_id, name, type, current_balance, bank_code, color_hex, card_last_digits, is_debit, is_credit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    db.run(query, [familyId, memberId, name, type || 'PERSONAL', initialBalance || 0, bankCode || null, colorHex || null, lastDigits || null, isDebitVal, isCreditVal], function(err) {
+    const query = `INSERT INTO accounts (family_id, member_id, name, type, current_balance, bank_code, color_hex, card_last_digits, is_debit, is_credit, credit_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    db.run(query, [familyId, memberId, name, type || 'PERSONAL', initialBalance || 0, bankCode || null, colorHex || null, lastDigits || null, isDebitVal, isCreditVal, creditLimitVal], function(err) {
         if (err) {
             console.error('Erro ao criar conta:', err);
             return res.status(500).json({ error: 'Erro ao criar conta' });
@@ -32,7 +33,7 @@ exports.createAccount = (req, res) => {
 exports.updateAccount = (req, res) => {
     const familyId = req.user.family_id;
     const accountId = req.params.id;
-    const { name, type, bankCode, colorHex, lastDigits, isDebit, isCredit } = req.body;
+    const { name, type, bankCode, colorHex, lastDigits, isDebit, isCredit, creditLimit } = req.body;
 
     if (!name) {
         return res.status(400).json({ error: 'O nome da conta é obrigatório' });
@@ -40,14 +41,15 @@ exports.updateAccount = (req, res) => {
 
     const isDebitVal = (isDebit === undefined) ? 1 : (isDebit ? 1 : 0);
     const isCreditVal = (isCredit === undefined) ? 0 : (isCredit ? 1 : 0);
+    const creditLimitVal = creditLimit || 0;
 
     db.get(`SELECT id FROM accounts WHERE id = ? AND family_id = ?`, [accountId, familyId], (err, row) => {
         if (err || !row) {
             return res.status(404).json({ error: 'Conta não encontrada ou sem permissão' });
         }
 
-        const query = `UPDATE accounts SET name = ?, type = ?, bank_code = ?, color_hex = ?, card_last_digits = ?, is_debit = ?, is_credit = ? WHERE id = ?`;
-        db.run(query, [name, type || 'PERSONAL', bankCode || null, colorHex || null, lastDigits || null, isDebitVal, isCreditVal, accountId], function(errUpdate) {
+        const query = `UPDATE accounts SET name = ?, type = ?, bank_code = ?, color_hex = ?, card_last_digits = ?, is_debit = ?, is_credit = ?, credit_limit = ? WHERE id = ?`;
+        db.run(query, [name, type || 'PERSONAL', bankCode || null, colorHex || null, lastDigits || null, isDebitVal, isCreditVal, creditLimitVal, accountId], function(errUpdate) {
             if (errUpdate) {
                 console.error('Erro ao atualizar conta:', errUpdate);
                 return res.status(500).json({ error: 'Erro ao atualizar conta' });
