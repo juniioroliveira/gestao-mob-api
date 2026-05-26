@@ -19,12 +19,15 @@ console.log('✅ Conectado ao banco de dados MySQL Remoto (Hostinger).');
 
 // SQLite to MySQL Compatibility Layer
 const db = {
-    // Helper to replace SQLite specific syntax to MySQL
     _convertQuery(sql) {
         if (typeof sql !== 'string') return sql;
         let mysqlSql = sql;
         // Convert "INSERT OR IGNORE" to "INSERT IGNORE"
         mysqlSql = mysqlSql.replace(/INSERT\s+OR\s+IGNORE/gi, 'INSERT IGNORE');
+        // Convert "strftime(format, date_field)" to "DATE_FORMAT(date_field, format)"
+        mysqlSql = mysqlSql.replace(/strftime\(\s*'([^']+)'\s*,\s*([^)]+)\)/gi, "DATE_FORMAT($2, '$1')");
+        // Convert SQLite ON CONFLICT to MySQL ON DUPLICATE KEY
+        mysqlSql = mysqlSql.replace(/ON\s+CONFLICT\s*\([^)]+\)\s*DO\s+UPDATE\s+SET\s+([^=\s]+)\s*=\s*excluded\.(\w+)/gi, 'ON DUPLICATE KEY UPDATE $1 = VALUES($2)');
         return mysqlSql;
     },
 
