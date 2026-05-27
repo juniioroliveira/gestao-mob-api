@@ -6,5 +6,6 @@ const authenticateToken = require('../middlewares/authMiddleware');
 router.get('/', authenticateToken, statisticsController.getStatisticsData);
 router.post('/categories', authenticateToken, statisticsController.createCategory);
 router.put('/categories/:id', authenticateToken, statisticsController.updateCategory);
+router.delete('/categories/:id', authenticateToken, statisticsController.deleteCategory);
 
 module.exports = router;

@@ -205,3 +205,20 @@ exports.updateCategory = (req, res) => {
         }
     });
 };
+
+exports.deleteCategory = (req, res) => {
+    const familyId = req.user.family_id;
+    const categoryId = req.params.id;
+
+    db.run(`DELETE FROM category_budgets WHERE category_id = ?`, [categoryId], (err) => {
+        if (err) console.error('Erro ao deletar orçamentos:', err);
+        
+        db.run(`DELETE FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId], function(err2) {
+            if (err2) return res.status(500).json({ error: 'Erro ao excluir categoria' });
+            if (this.changes === 0) return res.status(404).json({ error: 'Categoria não encontrada' });
+            
+            getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'deleted' });
+            res.json({ message: 'Categoria excluída com sucesso' });
+        });
+    });
+};
