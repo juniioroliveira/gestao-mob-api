@@ -35,7 +35,6 @@ exports.createTransaction = async (req, res) => {
         return res.status(400).json({ error: 'Conta de destino inválida para transferência' });
     }
 
-    const finalPaymentType = paymentType || 'DEBIT';
     const totalInstallments = req.body.installments ? parseInt(req.body.installments, 10) : 1;
     const isInstallment = totalInstallments > 1;
     const installmentGroupId = isInstallment ? `GRP_${Date.now()}_${Math.floor(Math.random()*1000)}` : null;
@@ -143,7 +142,6 @@ exports.updateTransaction = async (req, res) => {
         return res.status(400).json({ error: 'Conta de destino inválida para transferência' });
     }
 
-    const finalPaymentType = paymentType || 'DEBIT';
 
     try {
         // 1. Pegar a transação antiga
