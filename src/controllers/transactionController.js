@@ -30,6 +30,10 @@ exports.createTransaction = async (req, res) => {
     }
 
     const finalPaymentType = paymentType || 'DEBIT';
+    const totalInstallments = req.body.installments ? parseInt(req.body.installments, 10) : 1;
+    const isInstallment = totalInstallments > 1;
+    const installmentGroupId = isInstallment ? `GRP_${Date.now()}_${Math.floor(Math.random()*1000)}` : null;
+    const installmentAmount = isInstallment ? (amount / totalInstallments).toFixed(2) : amount;
 
     try {
         // Validação de segurança extra no backend:
@@ -45,11 +49,43 @@ exports.createTransaction = async (req, res) => {
         }
 
         // Inserir a transação (memberId agora vem como string JSON)
-        const insertQuery = `
-            INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-        const result = await runQuery(insertQuery, [accountId, type === 'TRANSFER' ? destinationAccountId : null, JSON.stringify(req.body.memberId), type === 'TRANSFER' ? null : categoryId, amount, type, description, date, false, finalPaymentType]);
+        const baseDate = new Date(date);
+        // Adiciona timezone offset para evitar voltar um dia dependendo do fuso
+        baseDate.setMinutes(baseDate.getMinutes() + baseDate.getTimezoneOffset());
+        let firstResultId = null;
+
+        for (let i = 1; i <= totalInstallments; i++) {
+            const currentDate = new Date(baseDate);
+            currentDate.setMonth(currentDate.getMonth() + (i - 1));
+            // Volta para a string YYYY-MM-DD
+            const yyyy = currentDate.getFullYear();
+            const mm = String(currentDate.getMonth() + 1).padStart(2, '0');
+            const dd = String(currentDate.getDate()).padStart(2, '0');
+            const dateStr = `${yyyy}-${mm}-${dd}`;
+            
+            const desc = isInstallment ? `${description} (${i}/${totalInstallments})` : description;
+
+            const insertQuery = `
+                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+            const result = await runQuery(insertQuery, [
+                accountId, 
+                type === 'TRANSFER' ? destinationAccountId : null, 
+                JSON.stringify(req.body.memberId), 
+                type === 'TRANSFER' ? null : categoryId, 
+                installmentAmount, 
+                type, 
+                desc, 
+                dateStr, 
+                false, 
+                finalPaymentType,
+                installmentGroupId,
+                isInstallment ? i : null,
+                isInstallment ? totalInstallments : null
+            ]);
+            if (i === 1) firstResultId = result.lastID;
+        }
 
         // Atualizar saldos das contas
         if (type === 'EXPENSE') {
@@ -72,7 +108,7 @@ exports.createTransaction = async (req, res) => {
             });
         }
 
-        res.status(201).json({ message: 'Transação criada com sucesso', id: result.lastID });
+        res.status(201).json({ message: 'Transação criada com sucesso', id: firstResultId });
     } catch (err) {
         console.error('Erro ao adicionar transação:', err);
         res.status(500).json({ error: 'Erro interno no servidor' });

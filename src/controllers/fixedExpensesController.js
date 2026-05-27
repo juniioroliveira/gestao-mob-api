@@ -5,11 +5,9 @@ exports.getFixedExpenses = (req, res) => {
 
     const query = `
         SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id,
-               c.name as category_name, c.color_hex as category_color,
-               m.name as member_name, m.avatar_url as member_avatar
+               c.name as category_name, c.color_hex as category_color
         FROM recurring_bills rb
         JOIN categories c ON rb.category_id = c.id
-        LEFT JOIN members m ON rb.member_id = m.id
         WHERE rb.family_id = ?
         ORDER BY rb.due_day ASC
     `;
@@ -20,24 +18,58 @@ exports.getFixedExpenses = (req, res) => {
             return res.status(500).json({ error: 'Erro interno no servidor' });
         }
 
-        const expenses = rows.map(row => ({
-            id: row.id,
-            title: row.name,
-            amount: row.amount || 0.00,
-            rawAmount: row.amount,
-            dueDate: `Dia ${row.due_day}`,
-            dueDay: row.due_day,
-            isAutoPay: Boolean(row.is_auto_pay),
-            isActive: Boolean(row.is_active),
-            categoryId: row.category_id,
-            categoryName: row.category_name,
-            categoryColor: row.category_color,
-            memberId: row.member_id,
-            ownerName: row.member_name || 'Casa',
-            ownerAvatar: row.member_avatar || null
-        }));
+        db.all(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId], (err2, membersRows) => {
+            const members = membersRows || [];
 
-        res.json({ expenses });
+            const expenses = rows.map(row => {
+                let ownerName = 'Casa';
+                let ownerAvatars = [];
+                
+                try {
+                    if (row.member_id) {
+                        const memIds = JSON.parse(row.member_id);
+                        if (Array.isArray(memIds)) {
+                            const foundMembers = memIds.map(id => members.find(m => m.id === id)).filter(Boolean);
+                            if (foundMembers.length > 0) {
+                                ownerName = foundMembers.map(m => m.name.split(' ')[0]).join(', ');
+                                ownerAvatars = foundMembers.map(m => m.avatar_url).filter(Boolean);
+                            }
+                        } else {
+                            const m = members.find(mem => mem.id === memIds);
+                            if (m) {
+                                ownerName = m.name.split(' ')[0];
+                                if (m.avatar_url) ownerAvatars.push(m.avatar_url);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    const m = members.find(mem => mem.id == row.member_id);
+                    if (m) {
+                        ownerName = m.name.split(' ')[0];
+                        if (m.avatar_url) ownerAvatars.push(m.avatar_url);
+                    }
+                }
+
+                return {
+                    id: row.id,
+                    title: row.name,
+                    amount: row.amount || 0.00,
+                    rawAmount: row.amount,
+                    dueDate: `Dia ${row.due_day}`,
+                    dueDay: row.due_day,
+                    isAutoPay: Boolean(row.is_auto_pay),
+                    isActive: Boolean(row.is_active),
+                    categoryId: row.category_id,
+                    categoryName: row.category_name,
+                    categoryColor: row.category_color,
+                    memberId: row.member_id,
+                    ownerName: ownerName,
+                    ownerAvatars: ownerAvatars
+                };
+            });
+
+            res.json({ expenses });
+        });
     });
 };
 

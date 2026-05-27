@@ -37,21 +37,36 @@ exports.getHomeData = async (req, res) => {
 
         // 2. Receitas e Despesas do Mês Atual
         const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
-        const totalsData = await queryPromise(
-            `SELECT t.type, SUM(t.amount) as total 
-             FROM transactions t 
+        
+        // Income
+        const [incomeData] = await queryPromise(
+            `SELECT SUM(t.amount) as total FROM transactions t 
              JOIN accounts a ON t.account_id = a.id 
-             WHERE a.family_id = ? AND strftime('%Y-%m', t.transaction_date) = ? 
-             GROUP BY t.type`,
+             WHERE a.family_id = ? AND t.type = 'INCOME' AND strftime('%Y-%m', t.transaction_date) = ?`,
             [familyId, currentMonth]
         );
+        const income = incomeData?.total || 0;
 
-        let income = 0;
-        let expense = 0;
-        totalsData.forEach(row => {
-            if (row.type === 'INCOME') income = row.total;
-            if (row.type === 'EXPENSE') expense = row.total;
-        });
+        // Cash Expenses (Débito/Dinheiro/Pix)
+        const [cashExpenseData] = await queryPromise(
+            `SELECT SUM(t.amount) as total FROM transactions t 
+             JOIN accounts a ON t.account_id = a.id 
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type != 'CREDIT' AND strftime('%Y-%m', t.transaction_date) = ?`,
+            [familyId, currentMonth]
+        );
+        const cashExpenses = cashExpenseData?.total || 0;
+
+        // Credit Card Bills (Faturas do mês)
+        const [creditBillsData] = await queryPromise(
+            `SELECT SUM(t.amount) as total FROM transactions t 
+             JOIN accounts a ON t.account_id = a.id 
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type = 'CREDIT' AND strftime('%Y-%m', t.transaction_date) = ?`,
+            [familyId, currentMonth]
+        );
+        const creditCardBills = creditBillsData?.total || 0;
+
+        // Total Expense do mês = cashExpenses + creditCardBills
+        const expense = cashExpenses + creditCardBills;
 
         // 2.5 Despesas por Categoria para o Gráfico de Barras em Camadas
         const categoryExpensesRaw = await queryPromise(
@@ -149,6 +164,8 @@ exports.getHomeData = async (req, res) => {
             accounts,
             income,
             expense,
+            cashExpenses,
+            creditCardBills,
             fixedExpensesTotal,
             categoryExpenses,
             members,
