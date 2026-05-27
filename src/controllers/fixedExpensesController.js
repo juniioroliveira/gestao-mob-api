@@ -6,7 +6,12 @@ exports.getFixedExpenses = (req, res) => {
 
     const query = `
         SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
-               c.name as category_name, c.color_hex as category_color
+               c.name as category_name, c.color_hex as category_color,
+               (SELECT COUNT(*) FROM transactions t 
+                WHERE t.recurring_bill_id = rb.id 
+                AND MONTH(t.transaction_date) = MONTH(CURRENT_DATE()) 
+                AND YEAR(t.transaction_date) = YEAR(CURRENT_DATE())
+               ) as is_paid_this_month
         FROM recurring_bills rb
         JOIN categories c ON rb.category_id = c.id
         WHERE rb.family_id = ?
@@ -51,6 +56,22 @@ exports.getFixedExpenses = (req, res) => {
                     }
                 }
 
+                let status = 'Pendente';
+                let statusColor = '#2196F3'; // Azul
+                const today = new Date();
+                const currentDay = today.getDate();
+                
+                if (row.is_paid_this_month > 0) {
+                    status = 'Pago';
+                    statusColor = '#4CAF50'; // Verde
+                } else if (row.due_day < currentDay) {
+                    status = 'Atrasado';
+                    statusColor = '#F44336'; // Vermelho
+                } else if (row.due_day - currentDay <= 5 && row.due_day - currentDay >= 0) {
+                    status = 'Vence em breve';
+                    statusColor = '#FF9800'; // Laranja
+                }
+
                 return {
                     id: row.id,
                     title: row.name,
@@ -67,7 +88,9 @@ exports.getFixedExpenses = (req, res) => {
                     accountId: row.account_id,
                     paymentType: row.payment_type,
                     ownerName: ownerName,
-                    ownerAvatars: ownerAvatars
+                    ownerAvatars: ownerAvatars,
+                    status: status,
+                    statusColor: statusColor
                 };
             });
 

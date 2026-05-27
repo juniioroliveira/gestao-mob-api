@@ -70,9 +70,11 @@ exports.createTransaction = async (req, res) => {
             
             const desc = isInstallment ? `${description} (${i}/${totalInstallments})` : description;
 
+            const recurringBillId = req.body.recurring_bill_id || null;
+
             const insertQuery = `
-                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments, recurring_bill_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
             const result = await runQuery(insertQuery, [
                 accountId, 
@@ -87,7 +89,8 @@ exports.createTransaction = async (req, res) => {
                 finalPaymentType,
                 installmentGroupId,
                 isInstallment ? i : null,
-                isInstallment ? totalInstallments : null
+                isInstallment ? totalInstallments : null,
+                recurringBillId
             ]);
             if (i === 1) firstResultId = result.lastID;
         }
