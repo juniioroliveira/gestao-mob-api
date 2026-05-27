@@ -1,10 +1,11 @@
 const db = require('../config/database');
+const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
 
 exports.getFixedExpenses = (req, res) => {
     const familyId = req.user.family_id;
 
     const query = `
-        SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id,
+        SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
                c.name as category_name, c.color_hex as category_color
         FROM recurring_bills rb
         JOIN categories c ON rb.category_id = c.id
@@ -63,6 +64,8 @@ exports.getFixedExpenses = (req, res) => {
                     categoryName: row.category_name,
                     categoryColor: row.category_color,
                     memberId: row.member_id,
+                    accountId: row.account_id,
+                    paymentType: row.payment_type,
                     ownerName: ownerName,
                     ownerAvatars: ownerAvatars
                 };
@@ -73,17 +76,21 @@ exports.getFixedExpenses = (req, res) => {
     });
 };
 
-exports.createFixedExpense = (req, res) => {
+exports.createFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
-    const { name, amount, dueDay, isAutoPay, categoryId, memberId } = req.body;
+    let { name, amount, dueDay, isAutoPay, categoryId, memberId, accountId, paymentType } = req.body;
+
+    if (paymentType === 'CASH' && !accountId) {
+        accountId = await getOrCreateWalletAccountId(familyId);
+    }
 
     if (!name || !dueDay || !categoryId) {
         return res.status(400).json({ error: 'Nome, dia de vencimento e categoria são obrigatórios' });
     }
 
     const query = `
-        INSERT INTO recurring_bills (family_id, member_id, category_id, name, amount, due_day, is_auto_pay)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO recurring_bills (family_id, member_id, category_id, name, amount, due_day, is_auto_pay, account_id, payment_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
         familyId,
@@ -92,7 +99,9 @@ exports.createFixedExpense = (req, res) => {
         name,
         amount || null,
         dueDay,
-        isAutoPay ? 1 : 0
+        isAutoPay ? 1 : 0,
+        accountId || null,
+        paymentType || null
     ];
 
     db.run(query, params, function(err) {
@@ -104,10 +113,14 @@ exports.createFixedExpense = (req, res) => {
     });
 };
 
-exports.updateFixedExpense = (req, res) => {
+exports.updateFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
     const expenseId = req.params.id;
-    const { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId } = req.body;
+    let { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId, accountId, paymentType } = req.body;
+
+    if (paymentType === 'CASH' && !accountId) {
+        accountId = await getOrCreateWalletAccountId(familyId);
+    }
 
     if (!name || !dueDay || !categoryId) {
         return res.status(400).json({ error: 'Nome, dia de vencimento e categoria são obrigatórios' });
@@ -115,7 +128,7 @@ exports.updateFixedExpense = (req, res) => {
 
     const query = `
         UPDATE recurring_bills 
-        SET name = ?, amount = ?, due_day = ?, is_auto_pay = ?, is_active = ?, category_id = ?, member_id = ?
+        SET name = ?, amount = ?, due_day = ?, is_auto_pay = ?, is_active = ?, category_id = ?, member_id = ?, account_id = ?, payment_type = ?
         WHERE id = ? AND family_id = ?
     `;
     const params = [
@@ -126,6 +139,8 @@ exports.updateFixedExpense = (req, res) => {
         isActive !== undefined ? (isActive ? 1 : 0) : 1,
         categoryId,
         memberId || null,
+        accountId || null,
+        paymentType || null,
         expenseId,
         familyId
     ];

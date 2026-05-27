@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
+const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
 
 const runQuery = (query, params) => {
     return new Promise((resolve, reject) => {
@@ -11,11 +12,16 @@ const runQuery = (query, params) => {
 };
 
 exports.createTransaction = async (req, res) => {
-    const { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType } = req.body;
     
     // Se o usuário não enviou o memberId ou não for admin, usa o próprio ID dele
     const memberId = reqMemberId || req.user.id;
     const familyId = req.user.family_id;
+
+    const finalPaymentType = paymentType || 'DEBIT';
+    if (finalPaymentType === 'CASH' && !accountId) {
+        accountId = await getOrCreateWalletAccountId(familyId);
+    }
 
     if (!accountId || !amount || !type || !description || !date) {
         return res.status(400).json({ error: 'Campos obrigatórios ausentes' });
@@ -118,7 +124,12 @@ exports.createTransaction = async (req, res) => {
 exports.updateTransaction = async (req, res) => {
     const transactionId = req.params.id;
     const familyId = req.user.family_id;
-    const { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType } = req.body;
+
+    const finalPaymentType = paymentType || 'DEBIT';
+    if (finalPaymentType === 'CASH' && !accountId) {
+        accountId = await getOrCreateWalletAccountId(familyId);
+    }
 
     if (!accountId || !amount || !type || !description || !date) {
         return res.status(400).json({ error: 'Campos obrigatórios ausentes' });
