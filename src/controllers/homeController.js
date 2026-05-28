@@ -99,7 +99,7 @@ exports.getHomeData = async (req, res) => {
         // 4. Últimas Transações
         const rawRecentTransactions = await queryPromise(
             `SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
-                    t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type,
+                    t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type, t.recurring_bill_id,
                     a.name as account_name, 
                     c.name as category_name, c.icon, c.color_hex 
              FROM transactions t 
