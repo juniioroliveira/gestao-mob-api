@@ -99,7 +99,7 @@ exports.getStatisticsData = (req, res) => {
 
                 // Buscar receita total do mês baseada na previsão de renda dos membros da família
                 const incomeQuery = `
-                    SELECT COALESCE(SUM(monthly_income), 0) as totalIncome
+                    SELECT COALESCE(SUM(COALESCE(monthly_income, 0) + COALESCE(advance_value, 0)), 0) as totalIncome
                     FROM members
                     WHERE family_id = ?
                 `;
