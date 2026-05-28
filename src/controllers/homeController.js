@@ -51,7 +51,7 @@ exports.getHomeData = async (req, res) => {
         const [cashExpenseData] = await queryPromise(
             `SELECT SUM(t.amount) as total FROM transactions t 
              JOIN accounts a ON t.account_id = a.id 
-             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type != 'CREDIT' AND strftime('%Y-%m', t.transaction_date) = ?`,
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type != 'CREDIT' AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?`,
             [familyId, currentMonth]
         );
         const cashExpenses = cashExpenseData?.total || 0;
@@ -60,7 +60,17 @@ exports.getHomeData = async (req, res) => {
         const [creditBillsData] = await queryPromise(
             `SELECT SUM(t.amount) as total FROM transactions t 
              JOIN accounts a ON t.account_id = a.id 
-             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type = 'CREDIT' AND strftime('%Y-%m', t.transaction_date) = ?`,
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type = 'CREDIT' 
+             AND DATE_FORMAT(
+                 DATE_ADD(
+                     t.transaction_date, 
+                     INTERVAL (
+                         (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                         (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                     ) MONTH
+                 ),
+                 '%Y-%m'
+             ) = ?`,
             [familyId, currentMonth]
         );
         const creditCardBills = creditBillsData?.total || 0;
@@ -74,7 +84,21 @@ exports.getHomeData = async (req, res) => {
              FROM transactions t
              JOIN categories c ON t.category_id = c.id
              JOIN accounts a ON t.account_id = a.id
-             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND strftime('%Y-%m', t.transaction_date) = ?
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' 
+             AND DATE_FORMAT(
+                 CASE 
+                     WHEN a.type = 'CREDIT' THEN
+                         DATE_ADD(
+                             t.transaction_date, 
+                             INTERVAL (
+                                 (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                                 (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                             ) MONTH
+                         )
+                     ELSE t.transaction_date 
+                 END, 
+                 '%Y-%m'
+             ) = ?
              GROUP BY c.id
              ORDER BY total DESC`,
             [familyId, currentMonth]

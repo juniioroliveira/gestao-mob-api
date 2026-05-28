@@ -11,28 +11,42 @@ exports.getStatisticsData = (req, res) => {
     const currentMonth = reqMonth; // 1 a 12
     const currentYear = reqYear;
 
+    const monthStr = currentMonth.toString().padStart(2, '0');
+    const yearStr = currentYear.toString();
+    const targetMonthStr = `${yearStr}-${monthStr}`;
+
     // Query para obter os gastos por categoria e os orçamentos
     const query = `
         SELECT 
             c.id, c.name, c.color_hex, c.icon,
             COALESCE(cb.budget_limit, 0) as budget_limit,
-            COALESCE(SUM(t.amount), 0) as spent
+            COALESCE(SUM(t_filtered.amount), 0) as spent
         FROM categories c
         LEFT JOIN category_budgets cb ON c.id = cb.category_id AND cb.month = ? AND cb.year = ?
-        LEFT JOIN transactions t ON c.id = t.category_id 
-            AND t.type = 'EXPENSE' 
-            AND strftime('%m', t.transaction_date) = ? 
-            AND strftime('%Y', t.transaction_date) = ?
+        LEFT JOIN (
+            SELECT t.category_id, t.amount
+            FROM transactions t
+            JOIN accounts a ON t.account_id = a.id
+            WHERE t.type = 'EXPENSE' AND DATE_FORMAT(
+                 CASE 
+                     WHEN a.type = 'CREDIT' THEN
+                         DATE_ADD(
+                             t.transaction_date, 
+                             INTERVAL (
+                                 (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                                 (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                             ) MONTH
+                         )
+                     ELSE t.transaction_date 
+                 END, 
+                 '%Y-%m'
+            ) = ?
+        ) t_filtered ON c.id = t_filtered.category_id
         WHERE c.family_id = ? AND c.type = 'EXPENSE'
         GROUP BY c.id
     `;
 
-    // No SQLite, strftime('%m', date) retorna '12', '%Y' retorna '2023'
-    // Para simplificar, vamos passar a string padronizada com zero à esquerda
-    const monthStr = currentMonth.toString().padStart(2, '0');
-    const yearStr = currentYear.toString();
-
-    db.all(query, [currentMonth, currentYear, monthStr, yearStr, familyId], (err, rows) => {
+    db.all(query, [currentMonth, currentYear, targetMonthStr, familyId], (err, rows) => {
         if (err) {
             console.error('Erro ao buscar estatísticas:', err);
             return res.status(500).json({ error: 'Erro interno no servidor' });
@@ -62,12 +76,24 @@ exports.getStatisticsData = (req, res) => {
             JOIN accounts a ON t.account_id = a.id 
             LEFT JOIN categories c ON t.category_id = c.id 
             WHERE a.family_id = ? 
-              AND strftime('%m', t.transaction_date) = ? 
-              AND strftime('%Y', t.transaction_date) = ?
+              AND DATE_FORMAT(
+                 CASE 
+                     WHEN a.type = 'CREDIT' THEN
+                         DATE_ADD(
+                             t.transaction_date, 
+                             INTERVAL (
+                                 (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                                 (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                             ) MONTH
+                         )
+                     ELSE t.transaction_date 
+                 END, 
+                 '%Y-%m'
+              ) = ?
             ORDER BY t.transaction_date DESC, t.id DESC
         `;
 
-        db.all(transactionsQuery, [familyId, monthStr, yearStr], (err2, transactionsRows) => {
+        db.all(transactionsQuery, [familyId, targetMonthStr], (err2, transactionsRows) => {
             if (err2) {
                 console.error('Erro ao buscar transações na estatística:', err2);
                 return res.status(500).json({ error: 'Erro interno no servidor' });
