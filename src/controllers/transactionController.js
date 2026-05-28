@@ -126,7 +126,7 @@ exports.createTransaction = async (req, res) => {
 exports.updateTransaction = async (req, res) => {
     const transactionId = req.params.id;
     const familyId = req.user.family_id;
-    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType, recurring_bill_id } = req.body;
 
     const finalPaymentType = paymentType || 'DEBIT';
     if (finalPaymentType === 'CASH' && !accountId) {
@@ -175,7 +175,7 @@ exports.updateTransaction = async (req, res) => {
         // 3. Atualizar a transação
         const updateQuery = `
             UPDATE transactions 
-            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?, payment_type = ?
+            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?, payment_type = ?, recurring_bill_id = ?
             WHERE id = ?
         `;
         await runQuery(updateQuery, [
@@ -188,6 +188,7 @@ exports.updateTransaction = async (req, res) => {
             description, 
             date, 
             finalPaymentType,
+            recurring_bill_id || null,
             transactionId
         ]);
 
