@@ -16,16 +16,18 @@ exports.getWalletData = (req, res) => {
         accounts.forEach(acc => totalBalance += acc.current_balance);
 
         // 2. Buscar todos os membros
-        db.all(`SELECT id, name, avatar_url, monthly_income FROM members WHERE family_id = ?`, [familyId], (err, members) => {
+        db.all(`SELECT id, name, avatar_url, COALESCE(monthly_income, 0) + COALESCE(advance_value, 0) as total_income FROM members WHERE family_id = ?`, [familyId], (err, members) => {
             if (err) return res.status(500).json({ error: 'Erro interno' });
 
+            let familyTotalIncome = 0;
             const membersMap = {};
             members.forEach(m => {
+                familyTotalIncome += m.total_income;
                 membersMap[m.id] = {
                     memberId: m.id,
                     memberName: m.name,
                     avatarUrl: m.avatar_url,
-                    monthlyIncome: m.monthly_income,
+                    monthlyIncome: m.total_income,
                     totalSpent: 0,
                     individualSpent: 0,
                     categoriesMap: {}
@@ -57,16 +59,31 @@ exports.getWalletData = (req, res) => {
 
                 // 4. Buscar transações do mês (apenas EXPENSE e TRANSFER)
                 const queryTransactions = `
-                    SELECT t.amount, t.member_id, t.category_id, t.type, a.type as account_type
+                    SELECT t.amount, t.member_id, t.category_id, t.type, t.recurring_bill_id, a.type as account_type
                     FROM transactions t
                     JOIN accounts a ON t.account_id = a.id
-                    WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'TRANSFER') AND strftime('%Y-%m', t.transaction_date) = ?
+                    WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'TRANSFER') 
+                    AND DATE_FORMAT(
+                        CASE 
+                            WHEN a.type = 'CREDIT' THEN
+                                DATE_ADD(
+                                    t.transaction_date, 
+                                    INTERVAL (
+                                        (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                                        (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                                    ) MONTH
+                                )
+                            ELSE t.transaction_date 
+                        END, 
+                        '%Y-%m'
+                    ) = ?
                 `;
 
                 db.all(queryTransactions, [familyId, monthStr], (err, transactions) => {
                     if (err) return res.status(500).json({ error: 'Erro interno' });
 
                     let familyTotalExpenses = 0;
+                    let familyExtraExpenses = 0;
 
                     transactions.forEach(t => {
                         const amount = t.amount;
@@ -75,6 +92,9 @@ exports.getWalletData = (req, res) => {
                         // Filtramos apenas as despesas reais para não duplicar com as transferências (pagamentos de fatura de cartão)
                         if (t.type === 'EXPENSE') {
                             familyTotalExpenses += amount;
+                            if (!t.recurring_bill_id) {
+                                familyExtraExpenses += amount;
+                            }
 
                             // Atualiza o gasto total da família na categoria
                             if (catId && categoryBudgets[catId]) {
@@ -146,6 +166,8 @@ exports.getWalletData = (req, res) => {
                     res.json({
                         totalBalance,
                         familyTotalExpenses,
+                        familyExtraExpenses,
+                        familyTotalIncome,
                         memberExpenses
                     });
                 });
