@@ -123,16 +123,16 @@ exports.register = (req, res) => {
 
                 // Criar algumas categorias padrão
                 const defaultCategories = [
-                    ['Supermercado', 'shopping_cart', '#FF5722'],
-                    ['Salário', 'attach_money', '#4CAF50'],
-                    ['Lazer', 'sports_esports', '#2196F3'],
-                    ['Moradia', 'home', '#9C27B0'],
-                    ['Transporte', 'directions_car', '#FF9800']
+                    ['Supermercado', 'shopping_cart', '#FF5722', 'EXPENSE'],
+                    ['Salário', 'attach_money', '#4CAF50', 'INCOME'],
+                    ['Lazer', 'sports_esports', '#2196F3', 'EXPENSE'],
+                    ['Moradia', 'home', '#9C27B0', 'EXPENSE'],
+                    ['Transporte', 'directions_car', '#FF9800', 'EXPENSE']
                 ];
                 
-                const stmt = db.prepare('INSERT INTO categories (family_id, name, icon, color_hex) VALUES (?, ?, ?, ?)');
+                const stmt = db.prepare('INSERT INTO categories (family_id, name, icon, color_hex, type) VALUES (?, ?, ?, ?, ?)');
                 defaultCategories.forEach(cat => {
-                    stmt.run(familyId, cat[0], cat[1], cat[2]);
+                    stmt.run(familyId, cat[0], cat[1], cat[2], cat[3]);
                 });
                 stmt.finalize();
 

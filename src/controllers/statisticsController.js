@@ -18,7 +18,7 @@ exports.getStatisticsData = (req, res) => {
     // Query para obter os gastos por categoria e os orçamentos
     const query = `
         SELECT 
-            c.id, c.name, c.color_hex, c.icon,
+            c.id, c.name, c.color_hex, c.icon, c.type,
             COALESCE(cb.budget_limit, 0) as budget_limit,
             COALESCE(SUM(t_filtered.amount), 0) as spent
         FROM categories c
@@ -42,109 +42,135 @@ exports.getStatisticsData = (req, res) => {
                  '%Y-%m'
             ) = ?
         ) t_filtered ON c.id = t_filtered.category_id
-        WHERE c.family_id = ? AND c.type = 'EXPENSE'
+        WHERE c.family_id = ?
         GROUP BY c.id
     `;
 
-    db.all(query, [currentMonth, currentYear, targetMonthStr, familyId], (err, rows) => {
-        if (err) {
-            console.error('Erro ao buscar estatísticas:', err);
-            return res.status(500).json({ error: 'Erro interno no servidor' });
-        }
-
-        let totalExpense = 0;
-        const categories = rows.map(row => {
-            totalExpense += row.spent;
-            return {
-                id: row.id,
-                name: row.name,
-                color: row.color_hex || '#CCCCCC',
-                icon: row.icon || 'category',
-                limit: row.budget_limit,
-                spent: row.spent,
-                percentage: row.budget_limit > 0 ? (row.spent / row.budget_limit) : 0
-            };
-        });
-
-        // Buscar histórico de transações do mês
-        const transactionsQuery = `
-            SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
-                   t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type, t.recurring_bill_id,
-                   a.name as account_name, 
-                   c.icon, c.color_hex 
-            FROM transactions t 
-            JOIN accounts a ON t.account_id = a.id 
-            LEFT JOIN categories c ON t.category_id = c.id 
-            WHERE a.family_id = ? 
-              AND DATE_FORMAT(
-                 CASE 
-                     WHEN a.type = 'CREDIT' THEN
-                         DATE_ADD(
-                             t.transaction_date, 
-                             INTERVAL (
-                                 (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
-                                 (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
-                             ) MONTH
-                         )
-                     ELSE t.transaction_date 
-                 END, 
-                 '%Y-%m'
-              ) = ?
-            ORDER BY t.transaction_date DESC, t.id DESC
-        `;
-
-        db.all(transactionsQuery, [familyId, targetMonthStr], (err2, transactionsRows) => {
-            if (err2) {
-                console.error('Erro ao buscar transações na estatística:', err2);
+    const runMainQuery = () => {
+        db.all(query, [currentMonth, currentYear, targetMonthStr, familyId], (err, rows) => {
+            if (err) {
+                console.error('Erro ao buscar estatísticas:', err);
                 return res.status(500).json({ error: 'Erro interno no servidor' });
             }
 
-            // Precisamos buscar os membros para mapear os nomes
-            db.all(`SELECT id, name FROM members WHERE family_id = ?`, [familyId], (err4, membersRows) => {
-                const members = membersRows || [];
-                const finalTransactions = transactionsRows.map(t => {
-                    let memberName = 'Desconhecido';
-                    try {
-                        const memIds = JSON.parse(t.member_id);
-                        if (Array.isArray(memIds)) {
-                            const names = memIds.map(id => {
-                                const m = members.find(mem => mem.id === id);
-                                return m ? m.name.split(' ')[0] : '';
-                            }).filter(Boolean);
-                            memberName = names.length > 1 ? names.join(', ') : (names[0] || 'Desconhecido');
-                        } else {
-                            const m = members.find(mem => mem.id === memIds);
+            let totalExpense = 0;
+            const categories = rows.map(row => {
+                totalExpense += row.spent;
+                return {
+                    id: row.id,
+                    name: row.name,
+                    color: row.color_hex || '#CCCCCC',
+                    icon: row.icon || 'category',
+                    type: row.type || 'EXPENSE',
+                    limit: row.budget_limit,
+                    spent: row.spent,
+                    percentage: row.budget_limit > 0 ? (row.spent / row.budget_limit) : 0
+                };
+            });
+
+            // Buscar histórico de transações do mês
+            const transactionsQuery = `
+                SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
+                       t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type, t.recurring_bill_id,
+                       a.name as account_name, 
+                       c.icon, c.color_hex 
+                FROM transactions t 
+                JOIN accounts a ON t.account_id = a.id 
+                LEFT JOIN categories c ON t.category_id = c.id 
+                WHERE a.family_id = ? 
+                  AND DATE_FORMAT(
+                     CASE 
+                         WHEN a.type = 'CREDIT' THEN
+                             DATE_ADD(
+                                 t.transaction_date, 
+                                 INTERVAL (
+                                     (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                                     (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                                 ) MONTH
+                             )
+                         ELSE t.transaction_date 
+                     END, 
+                     '%Y-%m'
+                  ) = ?
+                ORDER BY t.transaction_date DESC, t.id DESC
+            `;
+
+            db.all(transactionsQuery, [familyId, targetMonthStr], (err2, transactionsRows) => {
+                if (err2) {
+                    console.error('Erro ao buscar transações na estatística:', err2);
+                    return res.status(500).json({ error: 'Erro interno no servidor' });
+                }
+
+                // Precisamos buscar os membros para mapear os nomes
+                db.all(`SELECT id, name FROM members WHERE family_id = ?`, [familyId], (err4, membersRows) => {
+                    const members = membersRows || [];
+                    const finalTransactions = transactionsRows.map(t => {
+                        let memberName = 'Desconhecido';
+                        try {
+                            const memIds = JSON.parse(t.member_id);
+                            if (Array.isArray(memIds)) {
+                                const names = memIds.map(id => {
+                                    const m = members.find(mem => mem.id === id);
+                                    return m ? m.name.split(' ')[0] : '';
+                                }).filter(Boolean);
+                                memberName = names.length > 1 ? names.join(', ') : (names[0] || 'Desconhecido');
+                            } else {
+                                const m = members.find(mem => mem.id === memIds);
+                                memberName = m ? m.name : 'Desconhecido';
+                            }
+                        } catch (e) {
+                            const m = members.find(mem => mem.id === t.member_id);
                             memberName = m ? m.name : 'Desconhecido';
                         }
-                    } catch (e) {
-                        const m = members.find(mem => mem.id === t.member_id);
-                        memberName = m ? m.name : 'Desconhecido';
-                    }
-                    return { ...t, member_name: memberName };
-                });
+                        return { ...t, member_name: memberName };
+                    });
 
-                // Buscar receita total do mês baseada na previsão de renda dos membros da família
-                const incomeQuery = `
-                    SELECT COALESCE(SUM(COALESCE(monthly_income, 0) + COALESCE(advance_value, 0)), 0) as totalIncome
-                    FROM members
-                    WHERE family_id = ?
-                `;
-                db.get(incomeQuery, [familyId], (err3, incomeRow) => {
-                    if (err3) {
-                        console.error('Erro ao buscar receitas na estatística:', err3);
-                        return res.status(500).json({ error: 'Erro interno no servidor' });
-                    }
+                    // Buscar receita total do mês baseada na previsão de renda dos membros da família
+                    const incomeQuery = `
+                        SELECT COALESCE(SUM(COALESCE(monthly_income, 0) + COALESCE(advance_value, 0)), 0) as totalIncome
+                        FROM members
+                        WHERE family_id = ?
+                    `;
+                    db.get(incomeQuery, [familyId], (err3, incomeRow) => {
+                        if (err3) {
+                            console.error('Erro ao buscar receitas na estatística:', err3);
+                            return res.status(500).json({ error: 'Erro interno no servidor' });
+                        }
 
-                    res.json({
-                        totalExpense,
-                        totalIncome: incomeRow ? incomeRow.totalIncome : 0,
-                        categories,
-                        transactions: finalTransactions
+                        res.json({
+                            totalExpense,
+                            totalIncome: incomeRow ? incomeRow.totalIncome : 0,
+                            categories,
+                            transactions: finalTransactions
+                        });
                     });
                 });
             });
         });
-    });
+    };
+
+    // Auto-correção: garante que a família tenha pelo menos uma categoria INCOME.
+    // Se não tiver, promove 'Salário' (ou similar) para INCOME.
+    db.get(
+        `SELECT COUNT(*) as count FROM categories WHERE family_id = ? AND type = 'INCOME'`,
+        [familyId],
+        (errCheck, checkRow) => {
+            if (!errCheck && checkRow && checkRow.count === 0) {
+                db.run(
+                    `UPDATE categories SET type = 'INCOME' 
+                     WHERE family_id = ? 
+                       AND (LOWER(name) LIKE 'salário%' OR LOWER(name) LIKE 'salario%' OR LOWER(name) = 'receita' OR LOWER(name) = 'renda')`,
+                    [familyId],
+                    (errUpd) => {
+                        if (errUpd) console.error('Erro ao promover categoria para INCOME:', errUpd);
+                        runMainQuery();
+                    }
+                );
+            } else {
+                runMainQuery();
+            }
+        }
+    );
 };
 
 exports.createCategory = (req, res) => {
