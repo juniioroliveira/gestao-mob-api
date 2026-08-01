@@ -2,9 +2,9 @@ const mysql = require('mysql2');
 require('dotenv').config();
 
 const config = {
-    host: process.env.DB_HOST || 'srv1437.hstgr.io',
+    host: process.env.DB_HOST || 'srv1662.hstgr.io',
     user: process.env.DB_USER || 'u167150707_gestaomob',
-    password: process.env.DB_PASSWORD || 'Ti873562',
+    password: process.env.DB_PASSWORD || '!@#123Ti006631',
     database: process.env.DB_NAME || 'u167150707_gestaomob',
     port: process.env.DB_PORT || 3306,
     waitForConnections: true,
