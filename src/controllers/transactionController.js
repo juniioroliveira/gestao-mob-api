@@ -405,12 +405,12 @@ exports.importOFX = async (req, res) => {
             return res.status(400).json({ error: 'Nenhuma transação válida encontrada no arquivo OFX' });
         }
 
-        // 1. Filtrar duplicados ANTES de processar
+        // 1. Filtrar duplicados ANTES de processar (verifica fitid globalmente, independente da conta)
         const newTxList = [];
         for (const tx of parsedTxList) {
             if (tx.fitid) {
                 const dup = await new Promise((resolve, reject) => {
-                    db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [accountId, tx.fitid], (err, row) => {
+                    db.get(`SELECT id FROM transactions WHERE fitid = ?`, [tx.fitid], (err, row) => {
                         if (err) reject(err);
                         else resolve(row);
                     });
@@ -537,15 +537,15 @@ exports.importOFX = async (req, res) => {
                             finalAccountId = tx.aiAccountId;
                         }
 
-                        // Verificar duplicidade novamente por segurança na conta final
+                        // Verificar duplicidade novamente por segurança (global, independente da conta)
                         if (tx.fitid) {
                             const dup = await new Promise((resolve, reject) => {
-                                db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [finalAccountId, tx.fitid], (err, row) => {
+                                db.get(`SELECT id FROM transactions WHERE fitid = ?`, [tx.fitid], (err, row) => {
                                     if (err) reject(err);
                                     else resolve(row);
                                 });
                             });
-                            if (dup) continue; // Pula se duplicado na conta final
+                            if (dup) continue; // Pula se fitid já existe em qualquer conta
                         }
 
                         const categoryId = tx.categoryId || (tx.type === 'EXPENSE' ? defaultExpenseCatId : defaultIncomeCatId);
