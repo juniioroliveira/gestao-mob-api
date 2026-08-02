@@ -172,12 +172,48 @@ exports.getHomeData = async (req, res) => {
             [familyId]
         );
 
-        // 7. Total de Contas Fixas Recorrentes (Ativas)
-        const [recurringTotals] = await queryPromise(
-            `SELECT SUM(amount) as total FROM recurring_bills WHERE family_id = ? AND is_active = 1`,
+        // 7. Total de Contas Fixas Recorrentes (Ativas) com cálculo de rateio personalizado para o usuário atual
+        const recurringBills = await queryPromise(
+            `SELECT amount, member_id FROM recurring_bills WHERE family_id = ? AND is_active = 1`,
             [familyId]
         );
-        const fixedExpensesTotal = recurringTotals.total || 0;
+
+        let fixedExpensesTotal = 0;
+        const currentUserId = req.user.id;
+
+        for (const bill of recurringBills) {
+            try {
+                if (bill.member_id) {
+                    let memIds;
+                    if (typeof bill.member_id === 'string' && bill.member_id.startsWith('[')) {
+                        memIds = JSON.parse(bill.member_id);
+                    } else if (Array.isArray(bill.member_id)) {
+                        memIds = bill.member_id;
+                    } else {
+                        memIds = [parseInt(bill.member_id, 10)];
+                    }
+
+                    if (Array.isArray(memIds)) {
+                        if (memIds.includes(currentUserId)) {
+                            fixedExpensesTotal += bill.amount / memIds.length;
+                        }
+                    }
+                } else {
+                    // Sem membro definido: divide igualmente entre todos os membros da família
+                    const [membersCountRow] = await queryPromise(
+                        `SELECT COUNT(*) as count FROM members WHERE family_id = ?`,
+                        [familyId]
+                    );
+                    const count = membersCountRow.count || 1;
+                    fixedExpensesTotal += bill.amount / count;
+                }
+            } catch (e) {
+                // Fallback
+                if (parseInt(bill.member_id, 10) === currentUserId) {
+                    fixedExpensesTotal += bill.amount;
+                }
+            }
+        }
 
         res.status(200).json({
             user: currentUser,
