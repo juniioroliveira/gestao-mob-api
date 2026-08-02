@@ -76,54 +76,7 @@ exports.getHomeData = async (req, res) => {
         );
         const creditCardBills = creditBillsData?.total || 0;
 
-        // 2.3 Rateio de Fatura de Cartão de Crédito do usuário atual
-        const creditTransactions = await queryPromise(
-            `SELECT t.amount, t.member_id FROM transactions t 
-             JOIN accounts a ON t.account_id = a.id 
-             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type = 'CREDIT' 
-             AND DATE_FORMAT(
-                 DATE_ADD(
-                     t.transaction_date, 
-                     INTERVAL (
-                         (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
-                         (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
-                     ) MONTH
-                 ),
-                 '%Y-%m'
-             ) = ?`,
-            [familyId, currentMonth]
-        );
-
         let userCreditCardBillsShare = 0;
-        for (const t of creditTransactions) {
-            try {
-                if (t.member_id) {
-                    let memIds;
-                    if (typeof t.member_id === 'string' && t.member_id.startsWith('[')) {
-                        memIds = JSON.parse(t.member_id);
-                    } else if (Array.isArray(t.member_id)) {
-                        memIds = t.member_id;
-                    } else {
-                        memIds = [parseInt(t.member_id, 10)];
-                    }
-
-                    if (Array.isArray(memIds) && memIds.includes(currentUserId)) {
-                        userCreditCardBillsShare += t.amount / memIds.length;
-                    }
-                } else {
-                    const [membersCountRow] = await queryPromise(
-                        `SELECT COUNT(*) as count FROM members WHERE family_id = ?`,
-                        [familyId]
-                    );
-                    const count = membersCountRow.count || 1;
-                    userCreditCardBillsShare += t.amount / count;
-                }
-            } catch (e) {
-                if (parseInt(t.member_id, 10) === currentUserId) {
-                    userCreditCardBillsShare += t.amount;
-                }
-            }
-        }
 
         // Total Expense do mês = cashExpenses + creditCardBills
         const expense = cashExpenses + creditCardBills;
@@ -326,7 +279,7 @@ exports.getHomeData = async (req, res) => {
             [familyId, currentMonth]
         );
 
-        let userCreditCardBillsShare = 0;
+        userCreditCardBillsShare = 0;
         for (const t of creditTransactions) {
             try {
                 let txShare = 0;
