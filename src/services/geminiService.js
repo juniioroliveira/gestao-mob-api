@@ -30,10 +30,22 @@ async function enrichTransactionsWithAI(familyId, transactions, categories, acco
         const systemInstruction = `
 Você é um assistente financeiro inteligente especializado em conciliação bancária para o app "Gestão Mob".
 Sua tarefa é analisar uma lista de transações bancárias brutas e, para cada uma delas, retornar um objeto estruturado:
-1. "description": Título limpo e amigável da loja, estabelecimento ou recebedor. Remova datas, CNPJs, CPFs, números de agência/conta, e termos como "Transferência enviada pelo Pix", "Compra no débito", etc. (ex: "Compra no débito - ROSSI" -> "Supermercado Rossi", "Transferência enviada pelo Pix - Jose Roberto Sanches ..." -> "José Roberto Sanches").
+
+1. "description": Título limpo e amigável. Siga estas regras com prioridade:
+   - Se o campo "description" já vier limpo (apenas um nome, ex: "Jose Roberto Sanches"), use-o diretamente.
+   - Se vier no padrão "Transferência enviada/recebida pelo Pix - NOME - CPF - BANCO...", extraia APENAS o NOME (ex: "Jose Roberto Sanches").
+   - Se vier no padrão "Compra no débito - ESTABELECIMENTO", extraia APENAS o nome do estabelecimento (ex: "Supermercado Rossi").
+   - Se vier "Aplicação RDB", "Resgate RDB", "IOF" ou outros termos financeiros, mantenha uma versão limpa e legível (ex: "Resgate RDB", "Aplicação RDB").
+   - Se vier "NU PAGAMENTOS S/A" como destinatário Pix, use "Nubank" como descrição.
+   - NUNCA retorne descrições genéricas como "Transferência Pix", "Pix Enviado" ou "Transação OFX" se houver qualquer nome disponível no campo.
+   - Remova CPFs, CNPJs, agências, números de conta, códigos de banco e símbolos "•".
+
 2. "categoryId": O ID numérico da categoria mais correspondente na lista fornecida. Combine exatamente o tipo da transação (INCOME para receitas, EXPENSE para despesas).
+
 3. "shouldCreateAccount": Boolean. Se a transação menciona uma conta ou banco que NÃO está na lista de contas fornecida (ex: notificação do PicPay, mas a conta PicPay não existe na lista), defina como true. Caso contrário, false.
+
 4. "newAccountName": Nome da conta/banco a ser criado se "shouldCreateAccount" for true (ex: "PicPay"). Se false, retorne null.
+
 5. "accountId": O ID numérico da conta correspondente se "shouldCreateAccount" for false.
 
 Importante: Retorne exatamente um array JSON com a mesma quantidade de elementos da lista de entrada, na mesma ordem.

@@ -405,161 +405,284 @@ exports.importOFX = async (req, res) => {
             return res.status(400).json({ error: 'Nenhuma transação válida encontrada no arquivo OFX' });
         }
 
-        // Buscar categorias e contas para passar para a IA
-        const categories = await new Promise((resolve, reject) => {
-            db.all(`SELECT id, name, type FROM categories WHERE family_id = ?`, [familyId], (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
-
-        const accounts = await new Promise((resolve, reject) => {
-            db.all(`SELECT id, name FROM accounts WHERE family_id = ?`, [familyId], (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
-
-        // Enriquecer transações com Gemini Flash se a chave estiver configurada
-        let enrichedTxList = parsedTxList;
-        try {
-            const { enrichTransactionsWithAI } = require('../services/geminiService');
-            enrichedTxList = await enrichTransactionsWithAI(familyId, parsedTxList, categories, accounts);
-        } catch (aiErr) {
-            console.error('Falha ao rodar IA de enriquecimento:', aiErr);
-        }
-
-        // Obter ou criar categorias padrão "Outros" para despesas e receitas
-        const getCategory = async (name, type, icon, color) => {
-            const row = await new Promise((resolve, reject) => {
-                db.get(`SELECT id FROM categories WHERE family_id = ? AND name = ? AND type = ?`, [familyId, name, type], (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                });
-            });
-            if (row) return row.id;
-
-            return new Promise((resolve, reject) => {
-                db.run(`INSERT INTO categories (family_id, name, icon, color_hex, type) VALUES (?, ?, ?, ?, ?)`, 
-                    [familyId, name, icon, color, type], 
-                    function(err) {
-                        if (err) reject(err);
-                        else resolve(this.lastID);
-                    }
-                );
-            });
-        };
-
-        const defaultExpenseCatId = await getCategory('Outros (Despesas)', 'EXPENSE', 'more_horiz', '#708090');
-        const defaultIncomeCatId = await getCategory('Outros (Receitas)', 'INCOME', 'attach_money', '#20D864');
-
-        const getOrCreateAccount = async (name) => {
-            const row = await new Promise((resolve, reject) => {
-                db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ?`, [familyId, name.toLowerCase()], (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                });
-            });
-            if (row) return row.id;
-
-            return new Promise((resolve, reject) => {
-                db.run(`
-                    INSERT INTO accounts (family_id, member_id, name, type, current_balance, color_hex, is_debit, is_credit)
-                    VALUES (?, NULL, ?, 'PERSONAL', 0.00, '#4C9EEB', 1, 0)
-                `, [familyId, name], function(err) {
-                    if (err) reject(err);
-                    else resolve(this.lastID);
-                });
-            });
-        };
-
-        let importedCount = 0;
-        let skippedCount = 0;
-        const accountBalanceAdjustments = {};
-
-        for (const tx of enrichedTxList) {
-            let finalAccountId = accountId;
-
-            // Se a IA indicou para criar uma nova conta
-            if (tx.aiShouldCreateAccount && tx.aiNewAccountName) {
-                finalAccountId = await getOrCreateAccount(tx.aiNewAccountName);
-            } else if (tx.aiAccountId) {
-                finalAccountId = tx.aiAccountId;
-            }
-
-            // Verificar duplicidade por fitid na conta final
+        // 1. Filtrar duplicados ANTES de processar
+        const newTxList = [];
+        for (const tx of parsedTxList) {
             if (tx.fitid) {
                 const dup = await new Promise((resolve, reject) => {
-                    db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [finalAccountId, tx.fitid], (err, row) => {
+                    db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [accountId, tx.fitid], (err, row) => {
                         if (err) reject(err);
                         else resolve(row);
                     });
                 });
-                if (dup) {
-                    skippedCount++;
-                    continue;
+                if (dup) continue;
+            }
+            newTxList.push(tx);
+        }
+
+        if (newTxList.length === 0) {
+            return res.status(200).json({
+                message: 'Todas as transações do arquivo já foram importadas anteriormente.',
+                jobId: null,
+                importedCount: 0,
+                skippedCount: parsedTxList.length
+            });
+        }
+
+        // 2. Criar o Job de Importação em Background
+        const jobId = `job_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        await new Promise((resolve, reject) => {
+            db.run(`
+                INSERT INTO import_jobs (id, family_id, total_transactions, processed_transactions, status)
+                VALUES (?, ?, ?, 0, 'PROCESSING')
+            `, [jobId, familyId, newTxList.length], (err) => err ? reject(err) : resolve());
+        });
+
+        // 3. Responder imediatamente com o jobId
+        res.status(200).json({
+            message: 'Importação iniciada em segundo plano.',
+            jobId,
+            totalTransactions: newTxList.length,
+            skippedCount: parsedTxList.length - newTxList.length
+        });
+
+        // 4. Rodar o loop de processamento em background de forma assíncrona
+        setImmediate(async () => {
+            try {
+                // Obter categorias da família
+                const categories = await new Promise((resolve, reject) => {
+                    db.all(`SELECT id, name, type FROM categories WHERE family_id = ?`, [familyId], (err, rows) => {
+                        if (err) reject(err);
+                        else resolve(rows);
+                    });
+                });
+
+                // Obter contas da família
+                const accounts = await new Promise((resolve, reject) => {
+                    db.all(`SELECT id, name FROM accounts WHERE family_id = ?`, [familyId], (err, rows) => {
+                        if (err) reject(err);
+                        else resolve(rows);
+                    });
+                });
+
+                // Categorias padrão fallback
+                const getCategory = async (name, type, icon, color) => {
+                    const row = await new Promise((resolve, reject) => {
+                        db.get(`SELECT id FROM categories WHERE family_id = ? AND name = ? AND type = ?`, [familyId, name, type], (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        });
+                    });
+                    if (row) return row.id;
+
+                    return new Promise((resolve, reject) => {
+                        db.run(`INSERT INTO categories (family_id, name, icon, color_hex, type) VALUES (?, ?, ?, ?, ?)`, 
+                            [familyId, name, icon, color, type], 
+                            function(err) {
+                                if (err) reject(err);
+                                else resolve(this.lastID);
+                            }
+                        );
+                    });
+                };
+
+                const defaultExpenseCatId = await getCategory('Outros (Despesas)', 'EXPENSE', 'more_horiz', '#708090');
+                const defaultIncomeCatId = await getCategory('Outros (Receitas)', 'INCOME', 'attach_money', '#20D864');
+
+                const getOrCreateAccount = async (name) => {
+                    const row = await new Promise((resolve, reject) => {
+                        db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ?`, [familyId, name.toLowerCase()], (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        });
+                    });
+                    if (row) return row.id;
+
+                    return new Promise((resolve, reject) => {
+                        db.run(`
+                            INSERT INTO accounts (family_id, member_id, name, type, current_balance, color_hex, is_debit, is_credit)
+                            VALUES (?, NULL, ?, 'PERSONAL', 0.00, '#4C9EEB', 1, 0)
+                        `, [familyId, name], function(err) {
+                            if (err) reject(err);
+                            else resolve(this.lastID);
+                        });
+                    });
+                };
+
+                // Dividir em lotes (lotes de 15)
+                const batchSize = 15;
+                let processedCount = 0;
+
+                for (let i = 0; i < newTxList.length; i += batchSize) {
+                    const batch = newTxList.slice(i, i + batchSize);
+                    
+                    // Enriquecer o lote atual com Gemini
+                    let enrichedBatch = batch;
+                    try {
+                        const { enrichTransactionsWithAI } = require('../services/geminiService');
+                        enrichedBatch = await enrichTransactionsWithAI(familyId, batch, categories, accounts);
+                    } catch (aiErr) {
+                        console.error('Falha ao rodar IA de enriquecimento no lote:', aiErr);
+                    }
+
+                    const accountBalanceAdjustments = {};
+
+                    for (const tx of enrichedBatch) {
+                        let finalAccountId = accountId;
+
+                        // Se a IA indicou para criar uma nova conta
+                        if (tx.aiShouldCreateAccount && tx.aiNewAccountName) {
+                            finalAccountId = await getOrCreateAccount(tx.aiNewAccountName);
+                        } else if (tx.aiAccountId) {
+                            finalAccountId = tx.aiAccountId;
+                        }
+
+                        // Verificar duplicidade novamente por segurança na conta final
+                        if (tx.fitid) {
+                            const dup = await new Promise((resolve, reject) => {
+                                db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [finalAccountId, tx.fitid], (err, row) => {
+                                    if (err) reject(err);
+                                    else resolve(row);
+                                });
+                            });
+                            if (dup) continue; // Pula se duplicado na conta final
+                        }
+
+                        const categoryId = tx.categoryId || (tx.type === 'EXPENSE' ? defaultExpenseCatId : defaultIncomeCatId);
+
+                        await new Promise((resolve, reject) => {
+                            db.run(`
+                                INSERT INTO transactions (account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, fitid)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            `, [
+                                finalAccountId,
+                                JSON.stringify([memberId]),
+                                categoryId,
+                                tx.amount,
+                                tx.type,
+                                tx.description,
+                                tx.date,
+                                true,
+                                'DEBIT',
+                                tx.fitid || null
+                            ], (err) => err ? reject(err) : resolve());
+                        });
+
+                        const sign = tx.type === 'EXPENSE' ? -1 : 1;
+                        const delta = tx.amount * sign;
+                        accountBalanceAdjustments[finalAccountId] = (accountBalanceAdjustments[finalAccountId] || 0) + delta;
+                    }
+
+                    // Atualizar saldo das contas para o lote atual
+                    for (const [accId, delta] of Object.entries(accountBalanceAdjustments)) {
+                        await new Promise((resolve, reject) => {
+                            db.run(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, 
+                                [delta, accId, familyId], 
+                                (err) => err ? reject(err) : resolve()
+                            );
+                        });
+                    }
+
+                    processedCount += batch.length;
+
+                    // Atualizar progresso do Job no Banco
+                    await new Promise((resolve, reject) => {
+                        db.run(`UPDATE import_jobs SET processed_transactions = ? WHERE id = ?`, [processedCount, jobId], (err) => err ? reject(err) : resolve());
+                    });
+
+                    // Emitir progresso via WebSockets
+                    const io = getIo();
+                    if (io) {
+                        io.to(`family_${familyId}`).emit('import_progress', {
+                            jobId,
+                            processed: processedCount,
+                            total: newTxList.length,
+                            status: 'PROCESSING'
+                        });
+
+                        // Emitir atualização de dados gerais para re-renderizar telas
+                        io.to(`family_${familyId}`).emit('data_updated', {
+                            source: 'transactions',
+                            action: 'created'
+                        });
+                        io.to(`family_${familyId}`).emit('data_updated', {
+                            source: 'accounts',
+                            action: 'updated'
+                        });
+                    }
+
+                    // Se houver mais lotes, esperar 4 segundos para respeitar a cota do Gemini (Free Tier Rate Limit)
+                    if (i + batchSize < newTxList.length) {
+                        await new Promise(resolve => setTimeout(resolve, 4000));
+                    }
+                }
+
+                // Finalizar Job como COMPLETED
+                await new Promise((resolve, reject) => {
+                    db.run(`UPDATE import_jobs SET status = 'COMPLETED' WHERE id = ?`, [jobId], (err) => err ? reject(err) : resolve());
+                });
+
+                const io = getIo();
+                if (io) {
+                    io.to(`family_${familyId}`).emit('import_progress', {
+                        jobId,
+                        processed: newTxList.length,
+                        total: newTxList.length,
+                        status: 'COMPLETED'
+                    });
+                }
+
+            } catch (bgError) {
+                console.error('Erro no processamento em background do OFX:', bgError);
+                await new Promise((resolve, reject) => {
+                    db.run(`UPDATE import_jobs SET status = 'FAILED', error_message = ? WHERE id = ?`, [bgError.message, jobId], (err) => err ? reject(err) : resolve());
+                });
+
+                const io = getIo();
+                if (io) {
+                    io.to(`family_${familyId}`).emit('import_progress', {
+                        jobId,
+                        processed: processedCount,
+                        total: newTxList.length,
+                        status: 'FAILED',
+                        error: bgError.message
+                    });
                 }
             }
-
-            const categoryId = tx.categoryId || (tx.type === 'EXPENSE' ? defaultExpenseCatId : defaultIncomeCatId);
-
-            await new Promise((resolve, reject) => {
-                db.run(`
-                    INSERT INTO transactions (account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, fitid)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `, [
-                    finalAccountId,
-                    JSON.stringify([memberId]),
-                    categoryId,
-                    tx.amount,
-                    tx.type,
-                    tx.description,
-                    tx.date,
-                    true,
-                    'DEBIT',
-                    tx.fitid || null
-                ], (err) => err ? reject(err) : resolve());
-            });
-
-            const sign = tx.type === 'EXPENSE' ? -1 : 1;
-            const delta = tx.amount * sign;
-            accountBalanceAdjustments[finalAccountId] = (accountBalanceAdjustments[finalAccountId] || 0) + delta;
-            importedCount++;
-        }
-
-        if (importedCount > 0) {
-            // Atualizar saldo das contas afetadas
-            for (const [accId, delta] of Object.entries(accountBalanceAdjustments)) {
-                await new Promise((resolve, reject) => {
-                    db.run(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, 
-                        [delta, accId, familyId], 
-                        (err) => err ? reject(err) : resolve()
-                    );
-                });
-            }
-
-            const io = getIo();
-            if (io) {
-                io.to(`family_${familyId}`).emit('data_updated', {
-                    source: 'transactions',
-                    action: 'created'
-                });
-                io.to(`family_${familyId}`).emit('data_updated', {
-                    source: 'accounts',
-                    action: 'updated'
-                });
-            }
-        }
-
-        return res.status(200).json({
-            message: 'Importação concluída com sucesso',
-            importedCount,
-            skippedCount
         });
 
     } catch (error) {
         console.error('Erro na importação de OFX:', error);
         return res.status(500).json({ error: 'Erro interno ao processar arquivo OFX' });
+    }
+};
+
+exports.getImportJobStatus = async (req, res) => {
+    const { jobId } = req.params;
+    const familyId = req.user.family_id;
+
+    try {
+        const row = await new Promise((resolve, reject) => {
+            db.get(`SELECT id, total_transactions, processed_transactions, status, error_message FROM import_jobs WHERE id = ? AND family_id = ?`, [jobId, familyId], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+
+        if (!row) {
+            return res.status(404).json({ error: 'Job de importação não encontrado' });
+        }
+
+        return res.status(200).json({
+            jobId: row.id,
+            total: row.total_transactions,
+            processed: row.processed_transactions,
+            status: row.status,
+            error: row.error_message
+        });
+    } catch (error) {
+        console.error('Erro ao consultar status do job:', error);
+        return res.status(500).json({ error: 'Erro interno ao consultar status' });
     }
 };
 
