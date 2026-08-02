@@ -19,6 +19,70 @@ exports.createTransaction = async (req, res) => {
     const memberId = reqMemberId || req.user.id;
     const familyId = req.user.family_id;
 
+    // Se for uma notificação em tempo real ou marcado para IA, podemos usar a IA para tratar a descrição, conta e categoria!
+    if (description && (description.startsWith('[Notificação]') || req.body.use_ai)) {
+        try {
+            const rawDesc = description.replace('[Notificação]', '').trim();
+            const { enrichTransactionsWithAI } = require('../services/geminiService');
+            
+            // Buscar categorias e contas da família
+            const categories = await new Promise((resolve, reject) => {
+                db.all(`SELECT id, name, type FROM categories WHERE family_id = ?`, [familyId], (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                });
+            });
+            const accounts = await new Promise((resolve, reject) => {
+                db.all(`SELECT id, name FROM accounts WHERE family_id = ?`, [familyId], (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                });
+            });
+
+            const enriched = await enrichTransactionsWithAI(familyId, [{
+                description: rawDesc,
+                type: type,
+                amount: amount,
+                date: date
+            }], categories, accounts);
+
+            if (enriched && enriched[0]) {
+                description = enriched[0].description;
+                if (enriched[0].categoryId) {
+                    categoryId = enriched[0].categoryId;
+                }
+                
+                // Tratar se a IA indicou para criar uma nova conta
+                if (enriched[0].aiShouldCreateAccount && enriched[0].aiNewAccountName) {
+                    const getOrCreateAccount = async (name) => {
+                        const row = await new Promise((resolve, reject) => {
+                            db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ?`, [familyId, name.toLowerCase()], (err, row) => {
+                                if (err) reject(err);
+                                else resolve(row);
+                            });
+                        });
+                        if (row) return row.id;
+
+                        return new Promise((resolve, reject) => {
+                            db.run(`
+                                INSERT INTO accounts (family_id, member_id, name, type, current_balance, color_hex, is_debit, is_credit)
+                                VALUES (?, NULL, ?, 'PERSONAL', 0.00, '#4C9EEB', 1, 0)
+                            `, [familyId, name], function(err) {
+                                if (err) reject(err);
+                                else resolve(this.lastID);
+                            });
+                        });
+                    };
+                    accountId = await getOrCreateAccount(enriched[0].aiNewAccountName);
+                } else if (enriched[0].aiAccountId) {
+                    accountId = enriched[0].aiAccountId;
+                }
+            }
+        } catch (aiErr) {
+            console.error('Falha no processamento por IA da transação:', aiErr);
+        }
+    }
+
     const finalPaymentType = paymentType || 'DEBIT';
     if (finalPaymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -341,6 +405,30 @@ exports.importOFX = async (req, res) => {
             return res.status(400).json({ error: 'Nenhuma transação válida encontrada no arquivo OFX' });
         }
 
+        // Buscar categorias e contas para passar para a IA
+        const categories = await new Promise((resolve, reject) => {
+            db.all(`SELECT id, name, type FROM categories WHERE family_id = ?`, [familyId], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        const accounts = await new Promise((resolve, reject) => {
+            db.all(`SELECT id, name FROM accounts WHERE family_id = ?`, [familyId], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        // Enriquecer transações com Gemini Flash se a chave estiver configurada
+        let enrichedTxList = parsedTxList;
+        try {
+            const { enrichTransactionsWithAI } = require('../services/geminiService');
+            enrichedTxList = await enrichTransactionsWithAI(familyId, parsedTxList, categories, accounts);
+        } catch (aiErr) {
+            console.error('Falha ao rodar IA de enriquecimento:', aiErr);
+        }
+
         // Obter ou criar categorias padrão "Outros" para despesas e receitas
         const getCategory = async (name, type, icon, color) => {
             const row = await new Promise((resolve, reject) => {
@@ -365,14 +453,44 @@ exports.importOFX = async (req, res) => {
         const defaultExpenseCatId = await getCategory('Outros (Despesas)', 'EXPENSE', 'more_horiz', '#708090');
         const defaultIncomeCatId = await getCategory('Outros (Receitas)', 'INCOME', 'attach_money', '#20D864');
 
+        const getOrCreateAccount = async (name) => {
+            const row = await new Promise((resolve, reject) => {
+                db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ?`, [familyId, name.toLowerCase()], (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                });
+            });
+            if (row) return row.id;
+
+            return new Promise((resolve, reject) => {
+                db.run(`
+                    INSERT INTO accounts (family_id, member_id, name, type, current_balance, color_hex, is_debit, is_credit)
+                    VALUES (?, NULL, ?, 'PERSONAL', 0.00, '#4C9EEB', 1, 0)
+                `, [familyId, name], function(err) {
+                    if (err) reject(err);
+                    else resolve(this.lastID);
+                });
+            });
+        };
+
         let importedCount = 0;
         let skippedCount = 0;
-        let totalAmountAdjusted = 0;
+        const accountBalanceAdjustments = {};
 
-        for (const tx of parsedTxList) {
+        for (const tx of enrichedTxList) {
+            let finalAccountId = accountId;
+
+            // Se a IA indicou para criar uma nova conta
+            if (tx.aiShouldCreateAccount && tx.aiNewAccountName) {
+                finalAccountId = await getOrCreateAccount(tx.aiNewAccountName);
+            } else if (tx.aiAccountId) {
+                finalAccountId = tx.aiAccountId;
+            }
+
+            // Verificar duplicidade por fitid na conta final
             if (tx.fitid) {
                 const dup = await new Promise((resolve, reject) => {
-                    db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [accountId, tx.fitid], (err, row) => {
+                    db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [finalAccountId, tx.fitid], (err, row) => {
                         if (err) reject(err);
                         else resolve(row);
                     });
@@ -383,21 +501,21 @@ exports.importOFX = async (req, res) => {
                 }
             }
 
-            const categoryId = tx.type === 'EXPENSE' ? defaultExpenseCatId : defaultIncomeCatId;
+            const categoryId = tx.categoryId || (tx.type === 'EXPENSE' ? defaultExpenseCatId : defaultIncomeCatId);
 
             await new Promise((resolve, reject) => {
                 db.run(`
                     INSERT INTO transactions (account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, fitid)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `, [
-                    accountId,
+                    finalAccountId,
                     JSON.stringify([memberId]),
                     categoryId,
                     tx.amount,
                     tx.type,
                     tx.description,
                     tx.date,
-                    false,
+                    true,
                     'DEBIT',
                     tx.fitid || null
                 ], (err) => err ? reject(err) : resolve());
@@ -405,17 +523,20 @@ exports.importOFX = async (req, res) => {
 
             const sign = tx.type === 'EXPENSE' ? -1 : 1;
             const delta = tx.amount * sign;
-            totalAmountAdjusted += delta;
+            accountBalanceAdjustments[finalAccountId] = (accountBalanceAdjustments[finalAccountId] || 0) + delta;
             importedCount++;
         }
 
         if (importedCount > 0) {
-            await new Promise((resolve, reject) => {
-                db.run(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, 
-                    [totalAmountAdjusted, accountId, familyId], 
-                    (err) => err ? reject(err) : resolve()
-                );
-            });
+            // Atualizar saldo das contas afetadas
+            for (const [accId, delta] of Object.entries(accountBalanceAdjustments)) {
+                await new Promise((resolve, reject) => {
+                    db.run(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, 
+                        [delta, accId, familyId], 
+                        (err) => err ? reject(err) : resolve()
+                    );
+                });
+            }
 
             const io = getIo();
             if (io) {

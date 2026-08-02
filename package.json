@@ -9,6 +9,7 @@
     "build": "git add -A && git diff --cached --quiet || (git commit -m \"chore: auto-commit changes\" && git push origin main)"
   },
   "dependencies": {
+    "@google/genai": "^2.15.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
