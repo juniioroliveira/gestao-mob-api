@@ -5,6 +5,7 @@ const authenticateToken = require('../middlewares/authMiddleware');
 
 router.post('/', authenticateToken, transactionController.createTransaction);
 router.post('/import-ofx', authenticateToken, transactionController.importOFX);
+router.get('/health-ai', transactionController.healthAI);
 router.delete('/clear', authenticateToken, transactionController.clearTransactions);
 router.put('/:id', authenticateToken, transactionController.updateTransaction);
 router.delete('/:id', authenticateToken, transactionController.deleteTransaction);

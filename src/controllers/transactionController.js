@@ -562,3 +562,34 @@ exports.importOFX = async (req, res) => {
         return res.status(500).json({ error: 'Erro interno ao processar arquivo OFX' });
     }
 };
+
+exports.healthAI = async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+        return res.status(200).json({
+            status: 'OFFLINE',
+            message: 'GEMINI_API_KEY não encontrada no arquivo .env do servidor de produção.'
+        });
+    }
+
+    try {
+        const { GoogleGenAI } = require('@google/genai');
+        const ai = new GoogleGenAI({ apiKey });
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: 'Diga "Gemini Ativo!"'
+        });
+
+        return res.status(200).json({
+            status: 'ONLINE',
+            message: 'Gemini API conectada com sucesso!',
+            modelResponse: response.text.trim()
+        });
+    } catch (err) {
+        return res.status(500).json({
+            status: 'ERROR',
+            message: 'Erro ao conectar à API do Gemini.',
+            error: err.message
+        });
+    }
+};
