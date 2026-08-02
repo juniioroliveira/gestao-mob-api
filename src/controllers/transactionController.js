@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
 const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
+const { parseOFX } = require('../utils/ofxParser');
 
 const runQuery = (query, params) => {
     return new Promise((resolve, reject) => {
@@ -322,5 +323,121 @@ exports.clearTransactions = async (req, res) => {
     } catch (err) {
         console.error('Erro ao limpar lançamentos:', err);
         res.status(500).json({ error: 'Erro interno no servidor' });
+    }
+};
+
+exports.importOFX = async (req, res) => {
+    const { accountId, ofxContent } = req.body;
+    const familyId = req.user.family_id;
+    const memberId = req.user.id;
+
+    if (!accountId || !ofxContent) {
+        return res.status(400).json({ error: 'Campos obrigatórios ausentes: accountId e ofxContent' });
+    }
+
+    try {
+        const parsedTxList = parseOFX(ofxContent);
+        if (parsedTxList.length === 0) {
+            return res.status(400).json({ error: 'Nenhuma transação válida encontrada no arquivo OFX' });
+        }
+
+        // Obter ou criar categorias padrão "Outros" para despesas e receitas
+        const getCategory = async (name, type, icon, color) => {
+            const row = await new Promise((resolve, reject) => {
+                db.get(`SELECT id FROM categories WHERE family_id = ? AND name = ? AND type = ?`, [familyId, name, type], (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                });
+            });
+            if (row) return row.id;
+
+            return new Promise((resolve, reject) => {
+                db.run(`INSERT INTO categories (family_id, name, icon, color_hex, type) VALUES (?, ?, ?, ?, ?)`, 
+                    [familyId, name, icon, color, type], 
+                    function(err) {
+                        if (err) reject(err);
+                        else resolve(this.lastID);
+                    }
+                );
+            });
+        };
+
+        const defaultExpenseCatId = await getCategory('Outros (Despesas)', 'EXPENSE', 'more_horiz', '#708090');
+        const defaultIncomeCatId = await getCategory('Outros (Receitas)', 'INCOME', 'attach_money', '#20D864');
+
+        let importedCount = 0;
+        let skippedCount = 0;
+        let totalAmountAdjusted = 0;
+
+        for (const tx of parsedTxList) {
+            if (tx.fitid) {
+                const dup = await new Promise((resolve, reject) => {
+                    db.get(`SELECT id FROM transactions WHERE account_id = ? AND fitid = ?`, [accountId, tx.fitid], (err, row) => {
+                        if (err) reject(err);
+                        else resolve(row);
+                    });
+                });
+                if (dup) {
+                    skippedCount++;
+                    continue;
+                }
+            }
+
+            const categoryId = tx.type === 'EXPENSE' ? defaultExpenseCatId : defaultIncomeCatId;
+
+            await new Promise((resolve, reject) => {
+                db.run(`
+                    INSERT INTO transactions (account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, fitid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `, [
+                    accountId,
+                    JSON.stringify([memberId]),
+                    categoryId,
+                    tx.amount,
+                    tx.type,
+                    tx.description,
+                    tx.date,
+                    false,
+                    'DEBIT',
+                    tx.fitid || null
+                ], (err) => err ? reject(err) : resolve());
+            });
+
+            const sign = tx.type === 'EXPENSE' ? -1 : 1;
+            const delta = tx.amount * sign;
+            totalAmountAdjusted += delta;
+            importedCount++;
+        }
+
+        if (importedCount > 0) {
+            await new Promise((resolve, reject) => {
+                db.run(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, 
+                    [totalAmountAdjusted, accountId, familyId], 
+                    (err) => err ? reject(err) : resolve()
+                );
+            });
+
+            const io = getIo();
+            if (io) {
+                io.to(`family_${familyId}`).emit('data_updated', {
+                    source: 'transactions',
+                    action: 'created'
+                });
+                io.to(`family_${familyId}`).emit('data_updated', {
+                    source: 'accounts',
+                    action: 'updated'
+                });
+            }
+        }
+
+        return res.status(200).json({
+            message: 'Importação concluída com sucesso',
+            importedCount,
+            skippedCount
+        });
+
+    } catch (error) {
+        console.error('Erro na importação de OFX:', error);
+        return res.status(500).json({ error: 'Erro interno ao processar arquivo OFX' });
     }
 };
