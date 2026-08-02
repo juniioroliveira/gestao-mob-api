@@ -575,15 +575,15 @@ exports.healthAI = async (req, res) => {
     try {
         const { GoogleGenAI } = require('@google/genai');
         const ai = new GoogleGenAI({ apiKey });
-        const response = await ai.models.generateContent({
-            model: 'gemini-1.5-flash',
-            contents: 'Diga "Gemini Ativo!"'
-        });
+        
+        // Listar modelos disponíveis
+        const list = await ai.models.list();
+        const models = list.map(m => m.name);
 
         return res.status(200).json({
             status: 'ONLINE',
             message: 'Gemini API conectada com sucesso!',
-            modelResponse: response.text.trim()
+            availableModels: models
         });
     } catch (err) {
         return res.status(500).json({
