@@ -57,7 +57,7 @@ ${JSON.stringify(transactions.map(t => ({
 `;
 
         const response = await ai.models.generateContent({
-            model: 'gemini-1.5-flash',
+            model: 'gemini-flash-latest',
             contents: prompt,
             config: {
                 systemInstruction: systemInstruction,
