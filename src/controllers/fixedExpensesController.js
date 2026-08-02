@@ -197,3 +197,77 @@ exports.deleteFixedExpense = (req, res) => {
         res.json({ message: 'Conta fixa excluída com sucesso' });
     });
 };
+
+exports.getUnlinkedTransactions = (req, res) => {
+    const familyId = req.user.family_id;
+
+    const query = `
+        SELECT t.id, t.description, t.amount, t.transaction_date, a.name as account_name
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        WHERE a.family_id = ? 
+          AND t.type = 'EXPENSE'
+          AND t.recurring_bill_id IS NULL
+          AND MONTH(t.transaction_date) = MONTH(CURRENT_DATE())
+          AND YEAR(t.transaction_date) = YEAR(CURRENT_DATE())
+        ORDER BY t.transaction_date DESC, t.id DESC
+    `;
+
+    db.all(query, [familyId], (err, rows) => {
+        if (err) {
+            console.error('Erro ao buscar transações não vinculadas:', err);
+            return res.status(500).json({ error: 'Erro interno no servidor' });
+        }
+        res.json({ transactions: rows });
+    });
+};
+
+exports.linkTransaction = (req, res) => {
+    const familyId = req.user.family_id;
+    const { transactionId, recurringBillId } = req.body;
+
+    if (!transactionId || !recurringBillId) {
+        return res.status(400).json({ error: 'transactionId e recurringBillId são obrigatórios' });
+    }
+
+    const checkQuery = `
+        SELECT t.id as tx_id, a.family_id as tx_family_id, rb.id as rb_id, rb.family_id as rb_family_id
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        JOIN recurring_bills rb ON rb.id = ?
+        WHERE t.id = ?
+    `;
+
+    db.get(checkQuery, [recurringBillId, transactionId], (err, row) => {
+        if (err) {
+            console.error('Erro ao verificar permissão de vínculo:', err);
+            return res.status(500).json({ error: 'Erro interno no servidor' });
+        }
+
+        if (!row) {
+            return res.status(404).json({ error: 'Transação ou conta fixa não encontrada' });
+        }
+
+        if (row.tx_family_id !== familyId || row.rb_family_id !== familyId) {
+            return res.status(403).json({ error: 'Operação não permitida' });
+        }
+
+        db.run(`UPDATE transactions SET recurring_bill_id = ? WHERE id = ?`, [recurringBillId, transactionId], function(errUpdate) {
+            if (errUpdate) {
+                console.error('Erro ao atualizar transação com o ID da conta fixa:', errUpdate);
+                return res.status(500).json({ error: 'Erro ao vincular pagamento' });
+            }
+
+            const { getIo } = require('../websockets/socket');
+            const io = getIo();
+            if (io) {
+                io.to(`family_${familyId}`).emit('data_updated', {
+                    source: 'fixed_expenses',
+                    action: 'linked'
+                });
+            }
+
+            res.json({ message: 'Pagamento vinculado com sucesso!' });
+        });
+    });
+};

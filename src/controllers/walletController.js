@@ -193,6 +193,16 @@ exports.getThermometerAIData = async (req, res) => {
             });
         };
 
+        // Garante que a tabela de cache existe
+        await queryPromise(`
+            CREATE TABLE IF NOT EXISTS family_ai_cache (
+                family_id INT PRIMARY KEY,
+                cached_response TEXT NOT NULL,
+                last_hash VARCHAR(64) NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         // 1. Contas e Saldos
         const accounts = await queryPromise(`SELECT current_balance, type FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`, [familyId]);
         let totalBalance = 0;
@@ -235,7 +245,82 @@ exports.getThermometerAIData = async (req, res) => {
 
         // 5. Contas Fixas
         const fixedExpenses = await queryPromise(`SELECT amount, due_day, name FROM recurring_bills WHERE family_id = ? AND is_active = 1`, [familyId]);
-        const totalFixedExpenses = fixedExpenses.fold ? fixedExpenses.reduce((sum, item) => sum + item.amount, 0) : fixedExpenses.reduce((sum, item) => sum + item.amount, 0);
+        const totalFixedExpenses = fixedExpenses.reduce((sum, item) => sum + (item.amount || 0), 0);
+
+        // 5b. Próximo Recebimento do Membro Logado
+        const loggedInMemberId = req.user.id;
+        const loggedInMemberRow = await queryPromise(`
+            SELECT name, monthly_income, salary_day, advance_value, advance_day 
+            FROM members 
+            WHERE id = ?
+        `, [loggedInMemberId]);
+
+        let nextPaymentInfo = null;
+        if (loggedInMemberRow && loggedInMemberRow.length > 0) {
+            const member = loggedInMemberRow[0];
+            const now = new Date();
+            const currentDay = now.getDate();
+            const currentMonth = now.getMonth() + 1;
+            const currentYear = now.getFullYear();
+
+            const salaryDay = member.salary_day;
+            const advanceDay = member.advance_day;
+
+            const candidates = [];
+            if (salaryDay && member.monthly_income > 0) {
+                let salDate = new Date(currentYear, currentMonth - 1, salaryDay);
+                if (salaryDay < currentDay) {
+                    salDate = new Date(currentYear, currentMonth, salaryDay);
+                }
+                candidates.push({ type: 'Salário', day: salaryDay, value: member.monthly_income, date: salDate });
+            }
+
+            if (advanceDay && member.advance_value > 0) {
+                let advDate = new Date(currentYear, currentMonth - 1, advanceDay);
+                if (advanceDay < currentDay) {
+                    advDate = new Date(currentYear, currentMonth, advanceDay);
+                }
+                candidates.push({ type: 'Adiantamento', day: advanceDay, value: member.advance_value, date: advDate });
+            }
+
+            candidates.sort((a, b) => a.date - b.date);
+
+            let nextRec = candidates.length > 0 ? candidates[0] : null;
+
+            if (nextRec) {
+                const nextRecDate = nextRec.date;
+                const billsInInterval = [];
+                let totalUpcomingBills = 0;
+
+                fixedExpenses.forEach(bill => {
+                    const dueDay = bill.due_day;
+                    if (dueDay) {
+                        let billDate = new Date(currentYear, currentMonth - 1, dueDay);
+                        if (dueDay < currentDay) {
+                            billDate = new Date(currentYear, currentMonth, dueDay);
+                        }
+                        
+                        if (billDate >= new Date(currentYear, currentMonth - 1, currentDay) && billDate <= nextRecDate) {
+                            billsInInterval.push({
+                                name: bill.name,
+                                amount: bill.amount || 0,
+                                dueDay: dueDay
+                            });
+                            totalUpcomingBills += (bill.amount || 0);
+                        }
+                    }
+                });
+
+                nextPaymentInfo = {
+                    memberName: member.name,
+                    nextReceiptType: nextRec.type,
+                    nextReceiptDay: nextRec.day,
+                    nextReceiptValue: nextRec.value,
+                    upcomingBills: billsInInterval,
+                    totalUpcomingBills
+                };
+            }
+        }
 
         // Processar transações e categorias
         let familyTotalExpenses = 0;
@@ -257,6 +342,49 @@ exports.getThermometerAIData = async (req, res) => {
             }
         });
 
+        const crypto = require('crypto');
+        const now = new Date();
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        const currentDay = now.getDate();
+        const daysRemaining = daysInMonth - currentDay + 1;
+
+        // Gerar hash para cacheamento inteligente
+        const cacheInput = JSON.stringify({
+            totalBalance,
+            familyTotalIncome,
+            familyTotalExpenses,
+            totalFixedExpenses,
+            familyExtraExpenses,
+            currentDay,
+            daysRemaining,
+            categoryValues: Object.values(categoryMap),
+            recentTransactions: transactions.slice(0, 15).map(t => ({ desc: t.description, val: t.amount, data: t.transaction_date })),
+            nextPaymentInfo
+        });
+        const dataHash = crypto.createHash('sha256').update(cacheInput).digest('hex');
+
+        // Verificar se existe no cache
+        const cached = await queryPromise(`SELECT cached_response, last_hash FROM family_ai_cache WHERE family_id = ?`, [familyId]);
+        if (cached && cached.length > 0 && cached[0].last_hash === dataHash) {
+            console.log(`⚡ Retornando análise do Termômetro do cache para a família ${familyId}`);
+            try {
+                const aiJson = JSON.parse(cached[0].cached_response);
+                return res.json({
+                    useFallback: false,
+                    totalBalance,
+                    familyTotalIncome,
+                    familyTotalExpenses,
+                    daysRemaining,
+                    projectedLeftover: aiJson.projectedBalance,
+                    safeDailySpend: aiJson.safeDailySpend,
+                    isInTheRed: aiJson.isInTheRed,
+                    insights: aiJson.insights
+                });
+            } catch (jsonErr) {
+                console.warn('⚠️ Erro ao fazer parse do JSON do cache, gerando nova análise.', jsonErr);
+            }
+        }
+
         // 6. Fazer a chamada ao Gemini se a chave estiver configurada
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) {
@@ -268,11 +396,6 @@ exports.getThermometerAIData = async (req, res) => {
 
         const { GoogleGenAI } = require('@google/genai');
         const ai = new GoogleGenAI({ apiKey });
-
-        const now = new Date();
-        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-        const currentDay = now.getDate();
-        const daysRemaining = daysInMonth - currentDay + 1;
 
         const systemInstruction = `
 Você é uma IA analista financeira do app "Gestão Mob".
@@ -286,7 +409,22 @@ Sua resposta deve ser EXCLUSIVAMENTE um objeto JSON válido com as seguintes cha
    - "title": (String) Título chamativo e curto (ex: "Custo Fixo Saudável", "Orçamento Estourado", "Alimentação Acelerada").
    - "type": (String) "red" para alertas graves, "green" para conquistas/diagnósticos saudáveis, "blue" ou "orange" para alertas médios ou informativos.
    - "description": (String) Descrição explicativa curta e acionável com o nome de quem gastou ou o que causou o padrão. Seja direto.
+   
+Importante sobre o próximo recebimento: se fornecido no prompt o próximo recebimento do usuário logado e as contas a vencer antes dele, você deve gerar obrigatoriamente um insight/alerta do tipo 'orange' ou 'blue' com título chamativo (ex: "Atenção ao Dia X", "Programe seu Próximo Salário", "Proxima Meta de Contas"), indicando o total que vencerá antes do pagamento e se o saldo atual é suficiente para cobrir ou se ele precisará se planejar para esse dia.
 `;
+
+        let loggedInMemberPrompt = '';
+        if (nextPaymentInfo) {
+            loggedInMemberPrompt = `
+Dados de Recebimento do Usuário Logado (${nextPaymentInfo.memberName}):
+- Próximo recebimento previsto: ${nextPaymentInfo.nextReceiptType} no dia ${nextPaymentInfo.nextReceiptDay} (Valor: R$ ${nextPaymentInfo.nextReceiptValue.toFixed(2)})
+- Contas fixas da família que vencem até esta data de recebimento:
+${nextPaymentInfo.upcomingBills.length > 0 
+    ? nextPaymentInfo.upcomingBills.map(b => `  * ${b.name} (Vence dia ${b.dueDay}): R$ ${b.amount.toFixed(2)}`).join('\n')
+    : '  * Nenhuma conta fixa vencendo até lá.'}
+- Valor total das contas fixas que vencem antes do recebimento: R$ ${nextPaymentInfo.totalUpcomingBills.toFixed(2)}
+`;
+        }
 
         const prompt = `
 Métricas Atuais:
@@ -297,6 +435,7 @@ Métricas Atuais:
 - Despesas extras (fora fixas): R$ ${familyExtraExpenses.toFixed(2)}
 - Dia atual do mês: ${currentDay} de ${daysInMonth} dias totais.
 - Dias restantes: ${daysRemaining} dias.
+${loggedInMemberPrompt}
 
 Gastos por Categoria:
 ${JSON.stringify(Object.values(categoryMap), null, 2)}
@@ -306,7 +445,7 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
 `;
 
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-flash-latest',
             contents: prompt,
             config: {
                 systemInstruction: systemInstruction,
@@ -316,6 +455,19 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
 
         const aiResponseText = response.text.trim();
         const aiJson = JSON.parse(aiResponseText);
+
+        // Salvar/Atualizar no cache
+        try {
+            const existingCache = await queryPromise(`SELECT family_id FROM family_ai_cache WHERE family_id = ?`, [familyId]);
+            if (existingCache && existingCache.length > 0) {
+                await queryPromise(`UPDATE family_ai_cache SET cached_response = ?, last_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE family_id = ?`, [aiResponseText, dataHash, familyId]);
+            } else {
+                await queryPromise(`INSERT INTO family_ai_cache (family_id, cached_response, last_hash) VALUES (?, ?, ?)`, [familyId, aiResponseText, dataHash]);
+            }
+            console.log(`💾 Cache da análise atualizado para a família ${familyId}`);
+        } catch (cacheWriteErr) {
+            console.error('❌ Erro ao salvar cache no banco de dados:', cacheWriteErr);
+        }
 
         res.json({
             useFallback: false,
