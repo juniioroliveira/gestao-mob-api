@@ -12,6 +12,94 @@ const runQuery = (query, params) => {
     });
 };
 
+exports.getAccountTransactions = (req, res) => {
+    const familyId = req.user.family_id;
+    const accountId = req.query.accountId ? parseInt(req.query.accountId, 10) : null;
+    const days = req.query.days ? parseInt(req.query.days, 10) : null;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const offset = (page - 1) * limit;
+
+    const whereClauses = ['a.family_id = ?'];
+    const params = [familyId];
+
+    if (days) {
+        whereClauses.push('t.transaction_date >= DATE_SUB(NOW(), INTERVAL ? DAY)');
+        params.push(days);
+    } else {
+        whereClauses.push("DATE_FORMAT(t.transaction_date, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')");
+    }
+
+    if (accountId) {
+        whereClauses.push('(t.account_id = ? OR t.destination_account_id = ?)');
+        params.push(accountId, accountId);
+    }
+
+    const whereStr = whereClauses.join(' AND ');
+
+    db.all(`SELECT id, name FROM members WHERE family_id = ?`, [familyId], (err, membersRows) => {
+        if (err) return res.status(500).json({ error: 'Erro ao buscar membros' });
+        const members = membersRows || [];
+
+        const query = `
+            SELECT t.id, t.amount, t.type, t.description, t.transaction_date,
+                   t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type,
+                   a.name as account_name,
+                   c.icon, c.color_hex
+            FROM transactions t
+            JOIN accounts a ON t.account_id = a.id
+            LEFT JOIN categories c ON t.category_id = c.id
+            WHERE ${whereStr}
+            ORDER BY t.transaction_date DESC, t.id DESC
+            LIMIT ? OFFSET ?
+        `;
+
+        db.all(query, [...params, limit, offset], (err2, rows) => {
+            if (err2) return res.status(500).json({ error: 'Erro ao buscar transações' });
+
+            const finalTransactions = (rows || []).map(t => {
+                let memberName = 'Desconhecido';
+                try {
+                    const memIds = JSON.parse(t.member_id);
+                    if (Array.isArray(memIds)) {
+                        const names = memIds.map(id => {
+                            const m = members.find(mem => mem.id === id);
+                            return m ? m.name.split(' ')[0] : '';
+                        }).filter(Boolean);
+                        memberName = names.length > 1 ? names.join(', ') : (names[0] || 'Desconhecido');
+                    } else {
+                        const m = members.find(mem => mem.id === memIds);
+                        memberName = m ? m.name : 'Desconhecido';
+                    }
+                } catch (_) {
+                    const m = members.find(mem => mem.id === t.member_id);
+                    memberName = m ? m.name : 'Desconhecido';
+                }
+                return { ...t, member_name: memberName };
+            });
+
+            const countQuery = `
+                SELECT COUNT(*) as total
+                FROM transactions t
+                JOIN accounts a ON t.account_id = a.id
+                WHERE ${whereStr}
+            `;
+
+            db.get(countQuery, params, (err3, countRow) => {
+                if (err3) return res.status(500).json({ error: 'Erro ao contar transações' });
+                const total = countRow ? countRow.total : 0;
+                res.json({
+                    transactions: finalTransactions,
+                    total,
+                    page,
+                    limit,
+                    hasMore: offset + limit < total,
+                });
+            });
+        });
+    });
+};
+
 exports.createTransaction = async (req, res) => {
     let { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType } = req.body;
     
