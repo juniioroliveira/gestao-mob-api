@@ -211,9 +211,9 @@ exports.getHomeData = async (req, res) => {
             };
         });
 
-        // 5. Dados do Usuário Atual
+        // 5. Dados do Usuário Atual (incluindo dados de salário/adiantamento)
         const [currentUser] = await queryPromise(
-            `SELECT id, name, avatar_url, is_admin FROM members WHERE id = ?`,
+            `SELECT id, name, avatar_url, is_admin, salary_day, advance_day, advance_value, monthly_income FROM members WHERE id = ?`,
             [req.user.id]
         );
 
@@ -223,17 +223,39 @@ exports.getHomeData = async (req, res) => {
             [familyId]
         );
 
+        const salaryDay = currentUser.salary_day || 5;
+        const advanceDay = currentUser.advance_day || 20;
+
+        // Função auxiliar para identificar o período do vencimento da conta
+        function getPeriodForDueDay(dueDay) {
+            if (salaryDay < advanceDay) {
+                if (dueDay >= salaryDay && dueDay < advanceDay) {
+                    return 'SALARY';
+                } else {
+                    return 'ADVANCE';
+                }
+            } else {
+                if (dueDay >= advanceDay && dueDay < salaryDay) {
+                    return 'ADVANCE';
+                } else {
+                    return 'SALARY';
+                }
+            }
+        }
+
         // 7. Total de Contas Fixas Recorrentes (Ativas) com cálculo de rateio personalizado para o usuário atual
         const recurringBills = await queryPromise(
-            `SELECT amount, member_id FROM recurring_bills WHERE family_id = ? AND is_active = 1`,
+            `SELECT amount, member_id, due_day FROM recurring_bills WHERE family_id = ? AND is_active = 1`,
             [familyId]
         );
 
         let fixedExpensesTotal = 0;
-        const currentUserId = req.user.id;
+        let salaryPeriodFixedTotal = 0;
+        let advancePeriodFixedTotal = 0;
 
         for (const bill of recurringBills) {
             try {
+                let billShare = 0;
                 if (bill.member_id) {
                     let memIds;
                     if (typeof bill.member_id === 'string' && bill.member_id.startsWith('[')) {
@@ -246,7 +268,7 @@ exports.getHomeData = async (req, res) => {
 
                     if (Array.isArray(memIds)) {
                         if (memIds.includes(currentUserId)) {
-                            fixedExpensesTotal += bill.amount / memIds.length;
+                            billShare = bill.amount / memIds.length;
                         }
                     }
                 } else {
@@ -256,12 +278,98 @@ exports.getHomeData = async (req, res) => {
                         [familyId]
                     );
                     const count = membersCountRow.count || 1;
-                    fixedExpensesTotal += bill.amount / count;
+                    billShare = bill.amount / count;
+                }
+
+                fixedExpensesTotal += billShare;
+                
+                // Distribui no período correto
+                const period = getPeriodForDueDay(bill.due_day || 15);
+                if (period === 'SALARY') {
+                    salaryPeriodFixedTotal += billShare;
+                } else {
+                    advancePeriodFixedTotal += billShare;
                 }
             } catch (e) {
                 // Fallback
                 if (parseInt(bill.member_id, 10) === currentUserId) {
                     fixedExpensesTotal += bill.amount;
+                    const period = getPeriodForDueDay(bill.due_day || 15);
+                    if (period === 'SALARY') {
+                        salaryPeriodFixedTotal += bill.amount;
+                    } else {
+                        advancePeriodFixedTotal += bill.amount;
+                    }
+                }
+            }
+        }
+
+        // Calcula divisão de períodos para despesas do cartão de crédito
+        let salaryPeriodCreditTotal = 0;
+        let advancePeriodCreditTotal = 0;
+
+        // Faturas do mês do cartão de crédito mapeadas por período
+        const creditTransactions = await queryPromise(
+            `SELECT t.amount, t.member_id, a.due_day as card_due_day FROM transactions t 
+             JOIN accounts a ON t.account_id = a.id 
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND a.type = 'CREDIT' 
+             AND DATE_FORMAT(
+                 DATE_ADD(
+                     t.transaction_date, 
+                     INTERVAL (
+                         (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
+                         (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
+                     ) MONTH
+                 ),
+                 '%Y-%m'
+             ) = ?`,
+            [familyId, currentMonth]
+        );
+
+        let userCreditCardBillsShare = 0;
+        for (const t of creditTransactions) {
+            try {
+                let txShare = 0;
+                if (t.member_id) {
+                    let memIds;
+                    if (typeof t.member_id === 'string' && t.member_id.startsWith('[')) {
+                        memIds = JSON.parse(t.member_id);
+                    } else if (Array.isArray(t.member_id)) {
+                        memIds = t.member_id;
+                    } else {
+                        memIds = [parseInt(t.member_id, 10)];
+                    }
+
+                    if (Array.isArray(memIds) && memIds.includes(currentUserId)) {
+                        txShare = t.amount / memIds.length;
+                    }
+                } else {
+                    const [membersCountRow] = await queryPromise(
+                        `SELECT COUNT(*) as count FROM members WHERE family_id = ?`,
+                        [familyId]
+                    );
+                    const count = membersCountRow.count || 1;
+                    txShare = t.amount / count;
+                }
+
+                userCreditCardBillsShare += txShare;
+
+                // Distribui no período correto baseado no vencimento da fatura do cartão
+                const period = getPeriodForDueDay(t.card_due_day || 10);
+                if (period === 'SALARY') {
+                    salaryPeriodCreditTotal += txShare;
+                } else {
+                    advancePeriodCreditTotal += txShare;
+                }
+            } catch (e) {
+                if (parseInt(t.member_id, 10) === currentUserId) {
+                    userCreditCardBillsShare += t.amount;
+                    const period = getPeriodForDueDay(t.card_due_day || 10);
+                    if (period === 'SALARY') {
+                        salaryPeriodCreditTotal += t.amount;
+                    } else {
+                        advancePeriodCreditTotal += t.amount;
+                    }
                 }
             }
         }
@@ -278,6 +386,8 @@ exports.getHomeData = async (req, res) => {
             cashExpenses,
             creditCardBills,
             fixedExpensesTotal: fixedExpensesTotal + userCreditCardBillsShare,
+            salaryPeriodTotal: salaryPeriodFixedTotal + salaryPeriodCreditTotal,
+            advancePeriodTotal: advancePeriodFixedTotal + advancePeriodCreditTotal,
             categoryExpenses,
             members,
             recentTransactions
