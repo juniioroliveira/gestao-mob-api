@@ -3,9 +3,11 @@ const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
 
 exports.getFixedExpenses = (req, res) => {
     const familyId = req.user.family_id;
+    const filterType = req.query.type;
 
-    const query = `
+    let query = `
         SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
+               rb.type, rb.total_installments, rb.current_installment, rb.start_date, rb.end_date,
                c.name as category_name, c.color_hex as category_color,
                (SELECT COUNT(*) FROM transactions t 
                 WHERE t.recurring_bill_id = rb.id 
@@ -15,10 +17,17 @@ exports.getFixedExpenses = (req, res) => {
         FROM recurring_bills rb
         JOIN categories c ON rb.category_id = c.id
         WHERE rb.family_id = ?
-        ORDER BY rb.due_day ASC
     `;
+    const params = [familyId];
 
-    db.all(query, [familyId], (err, rows) => {
+    if (filterType) {
+        query += ` AND rb.type = ?`;
+        params.push(filterType);
+    }
+    
+    query += ` ORDER BY rb.due_day ASC`;
+
+    db.all(query, params, (err, rows) => {
         if (err) {
             console.error('Erro ao buscar contas fixas:', err);
             return res.status(500).json({ error: 'Erro interno no servidor' });
@@ -90,7 +99,13 @@ exports.getFixedExpenses = (req, res) => {
                     ownerName: ownerName,
                     ownerAvatars: ownerAvatars,
                     status: status,
-                    statusColor: statusColor
+                    statusColor: statusColor,
+                    type: row.type || 'FIXED',
+                    totalInstallments: row.total_installments,
+                    currentInstallment: row.current_installment,
+                    startDate: row.start_date,
+                    endDate: row.end_date,
+                    installmentLabel: row.total_installments ? `Parcela ${row.current_installment}/${row.total_installments}` : null
                 };
             });
 
@@ -101,7 +116,7 @@ exports.getFixedExpenses = (req, res) => {
 
 exports.createFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
-    let { name, amount, dueDay, isAutoPay, categoryId, memberId, accountId, paymentType } = req.body;
+    let { name, amount, dueDay, isAutoPay, categoryId, memberId, accountId, paymentType, type, totalInstallments, startDate } = req.body;
 
     if (paymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -111,9 +126,20 @@ exports.createFixedExpense = async (req, res) => {
         return res.status(400).json({ error: 'Nome, dia de vencimento e categoria são obrigatórios' });
     }
 
+    const expenseType = type || 'FIXED';
+    let endDate = null;
+    let currentInstallment = 1;
+
+    if (totalInstallments) {
+        const start = startDate ? new Date(startDate) : new Date();
+        const end = new Date(start);
+        end.setMonth(end.getMonth() + parseInt(totalInstallments));
+        endDate = end.toISOString().split('T')[0];
+    }
+
     const query = `
-        INSERT INTO recurring_bills (family_id, member_id, category_id, name, amount, due_day, is_auto_pay, account_id, payment_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO recurring_bills (family_id, member_id, category_id, name, amount, due_day, is_auto_pay, account_id, payment_type, type, total_installments, current_installment, start_date, end_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
         familyId,
@@ -124,7 +150,12 @@ exports.createFixedExpense = async (req, res) => {
         dueDay,
         isAutoPay ? 1 : 0,
         accountId || null,
-        paymentType || null
+        paymentType || null,
+        expenseType,
+        totalInstallments || null,
+        currentInstallment,
+        startDate || null,
+        endDate
     ];
 
     db.run(query, params, function(err) {
@@ -139,7 +170,7 @@ exports.createFixedExpense = async (req, res) => {
 exports.updateFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
     const expenseId = req.params.id;
-    let { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId, accountId, paymentType } = req.body;
+    let { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId, accountId, paymentType, type, totalInstallments, currentInstallment, startDate, endDate } = req.body;
 
     if (paymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -151,7 +182,8 @@ exports.updateFixedExpense = async (req, res) => {
 
     const query = `
         UPDATE recurring_bills 
-        SET name = ?, amount = ?, due_day = ?, is_auto_pay = ?, is_active = ?, category_id = ?, member_id = ?, account_id = ?, payment_type = ?
+        SET name = ?, amount = ?, due_day = ?, is_auto_pay = ?, is_active = ?, category_id = ?, member_id = ?, account_id = ?, payment_type = ?,
+            type = ?, total_installments = ?, current_installment = ?, start_date = ?, end_date = ?
         WHERE id = ? AND family_id = ?
     `;
     const params = [
@@ -164,6 +196,11 @@ exports.updateFixedExpense = async (req, res) => {
         memberId || null,
         accountId || null,
         paymentType || null,
+        type || 'FIXED',
+        totalInstallments || null,
+        currentInstallment || 1,
+        startDate || null,
+        endDate || null,
         expenseId,
         familyId
     ];
@@ -258,16 +295,34 @@ exports.linkTransaction = (req, res) => {
                 return res.status(500).json({ error: 'Erro ao vincular pagamento' });
             }
 
-            const { getIo } = require('../websockets/socket');
-            const io = getIo();
-            if (io) {
-                io.to(`family_${familyId}`).emit('data_updated', {
-                    source: 'fixed_expenses',
-                    action: 'linked'
-                });
-            }
+            db.get(`SELECT type, total_installments, current_installment FROM recurring_bills WHERE id = ? AND family_id = ?`, [recurringBillId, familyId], (errCheck, billRow) => {
+                if (errCheck) console.error('Erro ao verificar parcela de conta variável:', errCheck);
+                
+                if (billRow && billRow.type === 'VARIABLE' && billRow.total_installments !== null) {
+                    db.run(`UPDATE recurring_bills SET current_installment = current_installment + 1 WHERE id = ? AND type = 'VARIABLE'`, [recurringBillId], function(errInc) {
+                        if (errInc) console.error('Erro ao incrementar parcela:', errInc);
+                        
+                        db.run(`UPDATE recurring_bills SET is_active = 0 WHERE id = ? AND current_installment > total_installments`, [recurringBillId], function(errDeac) {
+                            if (errDeac) console.error('Erro ao desativar conta variável:', errDeac);
+                            emitUpdateAndRespond();
+                        });
+                    });
+                } else {
+                    emitUpdateAndRespond();
+                }
+            });
 
-            res.json({ message: 'Pagamento vinculado com sucesso!' });
+            function emitUpdateAndRespond() {
+                const { getIo } = require('../websockets/socket');
+                const io = getIo();
+                if (io) {
+                    io.to(`family_${familyId}`).emit('data_updated', {
+                        source: 'fixed_expenses',
+                        action: 'linked'
+                    });
+                }
+                res.json({ message: 'Pagamento vinculado com sucesso!' });
+            }
         });
     });
 };
