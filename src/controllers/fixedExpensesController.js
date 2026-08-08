@@ -99,31 +99,40 @@ exports.getFixedExpenses = async (req, res) => {
                     statusColor = '#FF9800'; // Laranja
                 }
 
-                return {
-                    id: row.id,
-                    title: row.name,
-                    amount: row.amount || 0.00,
-                    rawAmount: row.amount,
-                    dueDate: `Dia ${row.due_day}`,
-                    dueDay: row.due_day,
-                    isAutoPay: Boolean(row.is_auto_pay),
-                    isActive: Boolean(row.is_active),
-                    categoryId: row.category_id,
-                    categoryName: row.category_name,
-                    categoryColor: row.category_color,
-                    memberId: row.member_id,
-                    accountId: row.account_id,
-                    paymentType: row.payment_type,
-                    ownerName: ownerName,
-                    ownerAvatars: ownerAvatars,
-                    status: status,
-                    statusColor: statusColor,
-                    type: row.type || 'FIXED',
-                    totalInstallments: row.total_installments,
-                    currentInstallment: row.current_installment,
-                    startDate: row.start_date,
-                    endDate: row.end_date,
-                    installmentLabel: row.total_installments ? `Parcela ${row.current_installment}/${row.total_installments}` : null
+                    let calculatedInstallment = row.current_installment;
+                    if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+                        const startDate = new Date(row.start_date);
+                        // month and year from the query parameters (month is 1-12)
+                        const diffMonths = (year - startDate.getFullYear()) * 12 + (month - (startDate.getMonth() + 1));
+                        calculatedInstallment = diffMonths + 1;
+                        if (calculatedInstallment < 1) calculatedInstallment = 1;
+                    }
+
+                    return {
+                        id: row.id,
+                        title: row.name,
+                        amount: row.amount || 0.00,
+                        rawAmount: row.amount,
+                        dueDate: `Dia ${row.due_day}`,
+                        dueDay: row.due_day,
+                        isAutoPay: Boolean(row.is_auto_pay),
+                        isActive: Boolean(row.is_active),
+                        categoryId: row.category_id,
+                        categoryName: row.category_name,
+                        categoryColor: row.category_color,
+                        memberId: row.member_id,
+                        accountId: row.account_id,
+                        paymentType: row.payment_type,
+                        ownerName: ownerName,
+                        ownerAvatars: ownerAvatars,
+                        status: status,
+                        statusColor: statusColor,
+                        type: row.type || 'FIXED',
+                        totalInstallments: row.total_installments,
+                        currentInstallment: calculatedInstallment,
+                        startDate: row.start_date,
+                        endDate: row.end_date,
+                        installmentLabel: row.total_installments ? `Parcela ${calculatedInstallment}/${row.total_installments}` : null
                 };
             });
             // Fetch Credit Cards and sum their transactions for the month
