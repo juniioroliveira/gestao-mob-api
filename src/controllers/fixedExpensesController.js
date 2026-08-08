@@ -67,6 +67,18 @@ exports.getFixedExpenses = async (req, res) => {
             });
         }
 
+        // Also include manual payments (retroactive mark-as-paid)
+        const manualPaymentsRows = await queryPromise(
+            `SELECT recurring_bill_id, reference_month FROM bill_manual_payments WHERE family_id = ?`,
+            [familyId]
+        );
+        if (manualPaymentsRows) {
+            manualPaymentsRows.forEach(mp => {
+                if (!paidMap[mp.recurring_bill_id]) paidMap[mp.recurring_bill_id] = new Set();
+                paidMap[mp.recurring_bill_id].add(mp.reference_month);
+            });
+        }
+
         const membersRows = await queryPromise(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId]);
         const members = membersRows || [];
 
@@ -355,6 +367,47 @@ exports.getFixedExpenses = async (req, res) => {
         console.error('Erro ao buscar contas fixas:', err);
         return res.status(500).json({ error: 'Erro interno no servidor' });
     }
+};
+
+// Mark an overdue bill as paid manually (without a real transaction)
+exports.markAsPaid = (req, res) => {
+    const familyId = req.user.family_id;
+    const billId = req.params.id;
+    const { referenceMonth } = req.body; // e.g. "2026-07"
+
+    if (!referenceMonth || !/^\d{4}-\d{2}$/.test(referenceMonth)) {
+        return res.status(400).json({ error: 'referenceMonth inválido. Use o formato YYYY-MM.' });
+    }
+
+    // Verify the bill belongs to this family
+    db.get(`SELECT id FROM recurring_bills WHERE id = ? AND family_id = ?`, [billId, familyId], (err, row) => {
+        if (err || !row) return res.status(404).json({ error: 'Conta não encontrada.' });
+
+        db.run(
+            `INSERT IGNORE INTO bill_manual_payments (family_id, recurring_bill_id, reference_month) VALUES (?, ?, ?)`,
+            [familyId, billId, referenceMonth],
+            function(err2) {
+                if (err2) return res.status(500).json({ error: 'Erro ao marcar como pago.' });
+                res.json({ message: 'Marcado como pago com sucesso.' });
+            }
+        );
+    });
+};
+
+// Unmark a manual payment
+exports.unmarkAsPaid = (req, res) => {
+    const familyId = req.user.family_id;
+    const billId = req.params.id;
+    const { referenceMonth } = req.body;
+
+    db.run(
+        `DELETE FROM bill_manual_payments WHERE family_id = ? AND recurring_bill_id = ? AND reference_month = ?`,
+        [familyId, billId, referenceMonth],
+        function(err) {
+            if (err) return res.status(500).json({ error: 'Erro ao desmarcar pagamento.' });
+            res.json({ message: 'Pagamento removido com sucesso.' });
+        }
+    );
 };
 
 exports.createFixedExpense = async (req, res) => {
