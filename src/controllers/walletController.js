@@ -33,6 +33,7 @@ exports.getWalletData = (req, res) => {
                     avatarUrl: m.avatar_url,
                     monthlyIncome: m.total_income,
                     totalSpent: 0,
+                    extraSpent: 0,
                     individualSpent: 0,
                     categoriesMap: {}
                 };
@@ -122,6 +123,9 @@ exports.getWalletData = (req, res) => {
                                 owners.forEach(owner => {
                                     if (owner && membersMap[owner]) {
                                         membersMap[owner].totalSpent += share;
+                                        if (!t.recurring_bill_id) {
+                                            membersMap[owner].extraSpent += share;
+                                        }
                                         if (isIndividual) {
                                             membersMap[owner].individualSpent += share;
                                         }
@@ -158,6 +162,7 @@ exports.getWalletData = (req, res) => {
                             avatarUrl: m.avatarUrl,
                             monthlyIncome: m.monthlyIncome,
                             totalSpent: m.totalSpent,
+                            extraSpent: m.extraSpent,
                             sharedSpent: m.totalSpent - m.individualSpent,
                             individualSpent: m.individualSpent,
                             categories: memberCats
