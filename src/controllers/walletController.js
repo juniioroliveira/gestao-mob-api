@@ -13,10 +13,14 @@ exports.getWalletData = (req, res) => {
         if (err) return res.status(500).json({ error: 'Erro interno' });
         
         let totalBalance = 0;
-        accounts.forEach(acc => totalBalance += acc.current_balance);
+        accounts.forEach(acc => {
+            if (acc.type !== 'CREDIT') {
+                totalBalance += acc.current_balance;
+            }
+        });
 
         // 2. Buscar todos os membros
-        db.all(`SELECT id, name, avatar_url, COALESCE(monthly_income, 0) + COALESCE(advance_value, 0) as total_income FROM members WHERE family_id = ?`, [familyId], (err, members) => {
+        db.all(`SELECT id, name, avatar_url, COALESCE(monthly_income, 0) as total_income FROM members WHERE family_id = ?`, [familyId], (err, members) => {
             if (err) return res.status(500).json({ error: 'Erro interno' });
 
             let familyTotalIncome = 0;
@@ -203,10 +207,14 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
         // 1. Contas e Saldos
         const accounts = await queryPromise(`SELECT current_balance, type FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`, [familyId]);
         let totalBalance = 0;
-        accounts.forEach(acc => totalBalance += acc.current_balance);
+        accounts.forEach(acc => {
+            if (acc.type !== 'CREDIT') {
+                totalBalance += acc.current_balance;
+            }
+        });
 
         // 2. Membros e Renda
-        const members = await queryPromise(`SELECT id, name, COALESCE(monthly_income, 0) + COALESCE(advance_value, 0) as total_income FROM members WHERE family_id = ?`, [familyId]);
+        const members = await queryPromise(`SELECT id, name, COALESCE(monthly_income, 0) as total_income FROM members WHERE family_id = ?`, [familyId]);
         let familyTotalIncome = 0;
         members.forEach(m => familyTotalIncome += m.total_income);
 
