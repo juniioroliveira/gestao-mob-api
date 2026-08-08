@@ -376,7 +376,7 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
         let familyExtraExpenses = 0;
         const categoryMap = {};
         budgets.forEach(b => {
-            categoryMap[b.id] = { name: b.name, limit: b.budget_limit || 0, spent: 0 };
+            categoryMap[b.id] = { id: b.id, name: b.name, limit: b.budget_limit || 0, spent: 0 };
         });
 
         transactions.forEach(t => {
@@ -394,6 +394,7 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
         const crypto = require('crypto');
         const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
         const daysRemaining = daysInMonth - currentDay + 1;
+        const monthProgress = currentDay / daysInMonth;
 
         const strictProjectedBalance = familyTotalIncome - familyTotalExpenses - totalRemainingBillsThisMonth;
         const strictIsInTheRed = strictProjectedBalance < 0;
@@ -440,8 +441,11 @@ Sua resposta deve ser EXCLUSIVAMENTE um objeto JSON válido com as seguintes cha
    - "title": (String) Título chamativo e curto (ex: "Custo Fixo Saudável", "Orçamento Estourado", "Alimentação Acelerada").
    - "type": (String) "red" para alertas graves, "green" para conquistas/diagnósticos saudáveis, "blue" ou "orange" para alertas médios ou informativos.
    - "description": (String) Descrição explicativa curta e acionável com o nome de quem gastou ou o que causou o padrão. Seja direto.
+   - "action": (Objeto OPCIONAL) Use EXCLUSIVAMENTE se houver um alerta vermelho por Fluxo de Caixa negativo OU estouro de ritmo (Pacing) em categorias. Sugira REDUZIR o limite (budget_limit) de alguma outra categoria (ou da própria) para compensar e salvar dinheiro. Formato:
+     { "type": "REDUCE_BUDGET", "payload": { "categoryId": ID_AQUI, "amount": VALOR_NUMERICO_A_REDUZIR }, "label": "Reduzir R$ VALOR de NOME_DA_CATEGORIA" }
    
-Importante sobre o próximo recebimento: se fornecido no prompt o próximo recebimento do usuário logado e as contas a vencer antes dele, você deve gerar obrigatoriamente um insight/alerta do tipo 'orange' ou 'blue' indicando o total que vencerá antes do pagamento e se o saldo atual é suficiente para cobrir.
+Importante sobre Pacing (Orçamento Fracionado): Analise a porcentagem gasta de cada categoria comparada à porcentagem do mês decorrido ("Progresso do mês"). Se a categoria gastou 80% do limite mas estamos em 30% do mês, alerte sobre o "ritmo acelerado"!
+Importante sobre o próximo recebimento: se fornecido no prompt o próximo recebimento do usuário logado e as contas a vencer antes dele, você deve gerar obrigatoriamente um insight/alerta do tipo 'orange' ou 'red' caso o saldo atual não cubra o período.
 `;
 
         let loggedInMemberPrompt = '';
@@ -467,6 +471,7 @@ Métricas Atuais:
 - Despesas fixas (contas recorrentes): R$ ${totalFixedExpenses.toFixed(2)}
 - Despesas extras (fora fixas): R$ ${familyExtraExpenses.toFixed(2)}
 - Dia atual do mês: ${currentDay} de ${daysInMonth} dias totais.
+- Progresso do mês: ${(monthProgress * 100).toFixed(0)}% decorrido.
 - Dias restantes: ${daysRemaining} dias.
 ${loggedInMemberPrompt}
 
@@ -556,5 +561,53 @@ exports.getThermometerAIData = async (req, res) => {
             useFallback: true,
             error: err.message
         });
+    }
+};
+
+exports.executeAIAction = async (req, res) => {
+    const familyId = req.user.family_id;
+    const { actionType, payload } = req.body;
+
+    if (!actionType || !payload) {
+        return res.status(400).json({ error: 'Missing actionType or payload' });
+    }
+
+    try {
+        const db = require('../config/database');
+        const queryPromise = (query, params) => {
+            return new Promise((resolve, reject) => {
+                db.run(query, params, function (err) {
+                    if (err) reject(err);
+                    else resolve(this);
+                });
+            });
+        };
+
+        if (actionType === 'REDUCE_BUDGET') {
+            const categoryId = payload.categoryId;
+            const amount = parseFloat(payload.amount);
+
+            if (!categoryId || isNaN(amount) || amount <= 0) {
+                return res.status(400).json({ error: 'Invalid categoryId or amount' });
+            }
+
+            // Garante que o limite não fique negativo
+            await queryPromise(`
+                UPDATE categories 
+                SET budget_limit = GREATEST(0, budget_limit - ?) 
+                WHERE id = ? AND family_id = ?
+            `, [amount, categoryId, familyId]);
+
+            // Dispara atualização do termômetro
+            const { triggerUpdate } = require('../services/financialEventService');
+            triggerUpdate(familyId);
+
+            return res.json({ message: 'Orçamento reduzido com sucesso.' });
+        } else {
+            return res.status(400).json({ error: 'Unsupported actionType' });
+        }
+    } catch (err) {
+        console.error('Erro ao executar ação da IA:', err);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 };
