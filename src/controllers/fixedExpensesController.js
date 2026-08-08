@@ -53,9 +53,10 @@ exports.getFixedExpenses = async (req, res) => {
         // Fetch all transactions for this family's recurring bills to check for historical payments
         // Group them by recurring_bill_id and YYYY-MM
         const txQuery = `
-            SELECT recurring_bill_id, DATE_FORMAT(transaction_date, '%Y-%m') as tx_month 
-            FROM transactions 
-            WHERE family_id = ? AND recurring_bill_id IS NOT NULL
+            SELECT t.recurring_bill_id, DATE_FORMAT(t.transaction_date, '%Y-%m') as tx_month 
+            FROM transactions t
+            INNER JOIN recurring_bills rb ON rb.id = t.recurring_bill_id
+            WHERE rb.family_id = ? AND t.recurring_bill_id IS NOT NULL
         `;
         const txRows = await queryPromise(txQuery, [familyId]);
         const paidMap = {};
