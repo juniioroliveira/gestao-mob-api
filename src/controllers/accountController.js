@@ -39,6 +39,7 @@ exports.updateAccount = (req, res) => {
     if (!name) {
         return res.status(400).json({ error: 'O nome da conta é obrigatório' });
     }
+    console.log("UPDATE ACCOUNT REQ BODY:", req.body);
 
     const isDebitVal = (isDebit === undefined) ? 1 : (isDebit ? 1 : 0);
     const isCreditVal = (isCredit === undefined) ? 0 : (isCredit ? 1 : 0);
