@@ -14,7 +14,7 @@ exports.getFixedExpenses = async (req, res) => {
 
     let query = `
         SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
-               rb.type, rb.total_installments, rb.current_installment, rb.start_date, rb.end_date,
+               rb.type, rb.total_installments, rb.current_installment, rb.start_date, rb.end_date, rb.created_at,
                c.name as category_name, c.color_hex as category_color,
                (SELECT COUNT(*) FROM transactions t 
                 WHERE t.recurring_bill_id = rb.id 
@@ -32,15 +32,14 @@ exports.getFixedExpenses = async (req, res) => {
         params.push(filterType);
     }
 
-    // Filter variables by date
+    // Filter variables by date: we fetch everything that started BEFORE or AT the target month.
+    // If it's a variable expense, it must not have ended before the target month (unless we want to show it as unpaid after it ended? Usually it ends when total installments are reached).
+    // Actually, to find unpaid past installments, we need to fetch all active bills that existed in the past.
+    // We will fetch bills that start before the END of the target month.
     query += ` AND (
-        rb.type != 'VARIABLE' OR 
-        (
-            (rb.start_date IS NULL OR rb.start_date <= ?) AND 
-            (rb.end_date IS NULL OR rb.end_date >= ?)
-        )
+        rb.start_date IS NULL OR rb.start_date <= ?
     )`;
-    params.push(targetMonthEndStr, targetMonthStartStr);
+    params.push(targetMonthEndStr);
     
     query += ` ORDER BY rb.due_day ASC`;
 
@@ -51,90 +50,197 @@ exports.getFixedExpenses = async (req, res) => {
     try {
         const rows = await queryPromise(query, params);
 
+        // Fetch all transactions for this family's recurring bills to check for historical payments
+        // Group them by recurring_bill_id and YYYY-MM
+        const txQuery = `
+            SELECT recurring_bill_id, DATE_FORMAT(transaction_date, '%Y-%m') as tx_month 
+            FROM transactions 
+            WHERE family_id = ? AND recurring_bill_id IS NOT NULL
+        `;
+        const txRows = await queryPromise(txQuery, [familyId]);
+        const paidMap = {};
+        if (txRows) {
+            txRows.forEach(tx => {
+                if (!paidMap[tx.recurring_bill_id]) paidMap[tx.recurring_bill_id] = new Set();
+                paidMap[tx.recurring_bill_id].add(tx.tx_month);
+            });
+        }
+
         const membersRows = await queryPromise(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId]);
         const members = membersRows || [];
 
-            const expenses = rows.map(row => {
-                let ownerName = 'Casa';
-                let ownerAvatars = [];
-                
-                try {
-                    if (row.member_id) {
-                        const memIds = JSON.parse(row.member_id);
-                        if (Array.isArray(memIds)) {
-                            const foundMembers = memIds.map(id => members.find(m => m.id === id)).filter(Boolean);
-                            if (foundMembers.length > 0) {
-                                ownerName = foundMembers.map(m => m.name.split(' ')[0]).join(', ');
-                                ownerAvatars = foundMembers.map(m => m.avatar_url).filter(Boolean);
-                            }
-                        } else {
-                            const m = members.find(mem => mem.id === memIds);
-                            if (m) {
-                                ownerName = m.name.split(' ')[0];
-                                if (m.avatar_url) ownerAvatars.push(m.avatar_url);
-                            }
+        const expenses = [];
+
+        for (const row of rows) {
+            let ownerName = 'Casa';
+            let ownerAvatars = [];
+            
+            try {
+                if (row.member_id) {
+                    const memIds = JSON.parse(row.member_id);
+                    if (Array.isArray(memIds)) {
+                        const foundMembers = memIds.map(id => members.find(m => m.id === id)).filter(Boolean);
+                        if (foundMembers.length > 0) {
+                            ownerName = foundMembers.map(m => m.name.split(' ')[0]).join(', ');
+                            ownerAvatars = foundMembers.map(m => m.avatar_url).filter(Boolean);
+                        }
+                    } else {
+                        const m = members.find(mem => mem.id === memIds);
+                        if (m) {
+                            ownerName = m.name.split(' ')[0];
+                            if (m.avatar_url) ownerAvatars.push(m.avatar_url);
                         }
                     }
-                } catch (e) {
-                    const m = members.find(mem => mem.id == row.member_id);
-                    if (m) {
-                        ownerName = m.name.split(' ')[0];
-                        if (m.avatar_url) ownerAvatars.push(m.avatar_url);
+                }
+            } catch (e) {
+                const m = members.find(mem => mem.id == row.member_id);
+                if (m) {
+                    ownerName = m.name.split(' ')[0];
+                    if (m.avatar_url) ownerAvatars.push(m.avatar_url);
+                }
+            }
+
+            const getBaseExpenseObj = () => ({
+                id: row.id,
+                title: row.name,
+                amount: row.amount || 0.00,
+                rawAmount: row.amount,
+                dueDate: `Dia ${row.due_day}`,
+                dueDay: row.due_day,
+                isAutoPay: Boolean(row.is_auto_pay),
+                isActive: Boolean(row.is_active),
+                categoryId: row.category_id,
+                categoryName: row.category_name,
+                categoryColor: row.category_color,
+                memberId: row.member_id,
+                accountId: row.account_id,
+                paymentType: row.payment_type,
+                ownerName: ownerName,
+                ownerAvatars: ownerAvatars,
+                type: row.type || 'FIXED',
+                totalInstallments: row.total_installments,
+                startDate: row.start_date,
+                endDate: row.end_date,
+            });
+
+            // 1. GENERATE HISTORICAL UNPAID BILLS
+            // Determine the starting point: start_date if available, else created_at
+            let startYear, startMonth;
+            if (row.start_date) {
+                const sDate = new Date(row.start_date);
+                startYear = sDate.getFullYear();
+                startMonth = sDate.getMonth() + 1;
+            } else if (row.created_at) {
+                const cDate = new Date(row.created_at);
+                startYear = cDate.getFullYear();
+                startMonth = cDate.getMonth() + 1;
+            } else {
+                startYear = year;
+                startMonth = month;
+            }
+
+            // Loop from start date up to (month - 1) of the selected year
+            let currY = startYear;
+            let currM = startMonth;
+            
+            while (currY < year || (currY === year && currM < month)) {
+                // If it's a variable expense, stop if we exceed total installments or end_date
+                if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+                    const diffM = (currY - startYear) * 12 + (currM - startMonth);
+                    if (diffM >= row.total_installments) {
+                        break; // Exceeded installments
                     }
                 }
+                
+                const monthStr = `${currY}-${String(currM).padStart(2, '0')}`;
+                
+                // If this historical month was not paid, generate an overdue instance
+                if (!paidMap[row.id] || !paidMap[row.id].has(monthStr)) {
+                    const exp = getBaseExpenseObj();
+                    exp.status = 'Atrasado';
+                    exp.statusColor = '#F44336';
+                    exp.isOverdue = true;
+                    exp.referenceMonth = monthStr; // e.g. "2026-07"
+                    
+                    let calcInstallment = row.current_installment;
+                    if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+                        const diffM = (currY - startYear) * 12 + (currM - startMonth);
+                        calcInstallment = diffM + 1;
+                        exp.currentInstallment = calcInstallment;
+                        exp.installmentLabel = `Parcela ${calcInstallment}/${row.total_installments}`;
+                    } else {
+                        exp.currentInstallment = calcInstallment;
+                        exp.installmentLabel = null;
+                    }
+                    
+                    // Modify ID so it's unique in the frontend list
+                    exp.id = `${row.id}_${monthStr}`;
+                    expenses.push(exp);
+                }
+                
+                currM++;
+                if (currM > 12) {
+                    currM = 1;
+                    currY++;
+                }
+            }
 
+            // 2. GENERATE CURRENT MONTH BILL (if it falls within active range)
+            let isCurrentValid = true;
+            if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+                const startDate = new Date(row.start_date);
+                const diffMonths = (year - startDate.getFullYear()) * 12 + (month - (startDate.getMonth() + 1));
+                if (diffMonths >= row.total_installments || diffMonths < 0) {
+                    isCurrentValid = false;
+                }
+            }
+
+            if (isCurrentValid) {
+                const currentExp = getBaseExpenseObj();
                 let status = 'Pendente';
                 let statusColor = '#2196F3'; // Azul
+                
+                // Compare using actual dates
                 const today = new Date();
-                const currentDay = today.getDate();
+                // Set hours to 0 for fair date comparison
+                today.setHours(0,0,0,0);
+                const dueFullDate = new Date(year, month - 1, row.due_day);
                 
                 if (row.is_paid_this_month > 0) {
                     status = 'Pago';
                     statusColor = '#4CAF50'; // Verde
-                } else if (row.due_day < currentDay) {
+                } else if (dueFullDate < today) {
                     status = 'Atrasado';
                     statusColor = '#F44336'; // Vermelho
-                } else if (row.due_day - currentDay <= 5 && row.due_day - currentDay >= 0) {
-                    status = 'Vence em breve';
-                    statusColor = '#FF9800'; // Laranja
+                } else {
+                    const diffTime = dueFullDate.getTime() - today.getTime();
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    if (diffDays <= 5 && diffDays >= 0) {
+                        status = 'Vence em breve';
+                        statusColor = '#FF9800'; // Laranja
+                    }
                 }
 
-                    let calculatedInstallment = row.current_installment;
-                    if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
-                        const startDate = new Date(row.start_date);
-                        // month and year from the query parameters (month is 1-12)
-                        const diffMonths = (year - startDate.getFullYear()) * 12 + (month - (startDate.getMonth() + 1));
-                        calculatedInstallment = diffMonths + 1;
-                        if (calculatedInstallment < 1) calculatedInstallment = 1;
-                    }
+                currentExp.status = status;
+                currentExp.statusColor = statusColor;
+                currentExp.isOverdue = false;
+                
+                let calculatedInstallment = row.current_installment;
+                if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+                    const startDate = new Date(row.start_date);
+                    const diffMonths = (year - startDate.getFullYear()) * 12 + (month - (startDate.getMonth() + 1));
+                    calculatedInstallment = diffMonths + 1;
+                    if (calculatedInstallment < 1) calculatedInstallment = 1;
+                    currentExp.currentInstallment = calculatedInstallment;
+                    currentExp.installmentLabel = `Parcela ${calculatedInstallment}/${row.total_installments}`;
+                } else {
+                    currentExp.currentInstallment = calculatedInstallment;
+                    currentExp.installmentLabel = null;
+                }
 
-                    return {
-                        id: row.id,
-                        title: row.name,
-                        amount: row.amount || 0.00,
-                        rawAmount: row.amount,
-                        dueDate: `Dia ${row.due_day}`,
-                        dueDay: row.due_day,
-                        isAutoPay: Boolean(row.is_auto_pay),
-                        isActive: Boolean(row.is_active),
-                        categoryId: row.category_id,
-                        categoryName: row.category_name,
-                        categoryColor: row.category_color,
-                        memberId: row.member_id,
-                        accountId: row.account_id,
-                        paymentType: row.payment_type,
-                        ownerName: ownerName,
-                        ownerAvatars: ownerAvatars,
-                        status: status,
-                        statusColor: statusColor,
-                        type: row.type || 'FIXED',
-                        totalInstallments: row.total_installments,
-                        currentInstallment: calculatedInstallment,
-                        startDate: row.start_date,
-                        endDate: row.end_date,
-                        installmentLabel: row.total_installments ? `Parcela ${calculatedInstallment}/${row.total_installments}` : null
-                };
-            });
+                expenses.push(currentExp);
+            }
+        }
             // Fetch Credit Cards and sum their transactions for the month
             const creditCards = await queryPromise(`
                 SELECT id, name, closing_day, due_day, color_hex
