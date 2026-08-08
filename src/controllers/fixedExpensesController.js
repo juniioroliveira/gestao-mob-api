@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
+const { triggerUpdate } = require('../services/financialEventService');
 
 exports.getFixedExpenses = (req, res) => {
     const familyId = req.user.family_id;
@@ -163,6 +164,7 @@ exports.createFixedExpense = async (req, res) => {
             console.error('Erro ao criar conta fixa:', err);
             return res.status(500).json({ error: 'Erro ao criar conta fixa' });
         }
+        triggerUpdate(familyId);
         res.status(201).json({ message: 'Conta fixa criada com sucesso', id: this.lastID });
     });
 };
@@ -213,6 +215,7 @@ exports.updateFixedExpense = async (req, res) => {
         if (this.changes === 0) {
             return res.status(404).json({ error: 'Conta fixa não encontrada' });
         }
+        triggerUpdate(familyId);
         res.json({ message: 'Conta fixa atualizada com sucesso' });
     });
 };
@@ -231,6 +234,7 @@ exports.deleteFixedExpense = (req, res) => {
         if (this.changes === 0) {
             return res.status(404).json({ error: 'Conta fixa não encontrada' });
         }
+        triggerUpdate(familyId);
         res.json({ message: 'Conta fixa excluída com sucesso' });
     });
 };
@@ -321,6 +325,7 @@ exports.linkTransaction = (req, res) => {
                         action: 'linked'
                     });
                 }
+                triggerUpdate(familyId);
                 res.json({ message: 'Pagamento vinculado com sucesso!' });
             }
         });

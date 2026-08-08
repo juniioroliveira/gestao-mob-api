@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
+const { triggerUpdate } = require('../services/financialEventService');
 
 exports.createAccount = (req, res) => {
     const familyId = req.user.family_id;
@@ -25,7 +26,7 @@ exports.createAccount = (req, res) => {
             source: 'accounts',
             action: 'created'
         });
-
+        triggerUpdate(familyId);
         res.status(201).json({ message: 'Conta criada com sucesso', id: this.lastID });
     });
 };
@@ -59,7 +60,7 @@ exports.updateAccount = (req, res) => {
                 source: 'accounts',
                 action: 'updated'
             });
-
+            triggerUpdate(familyId);
             res.json({ message: 'Conta atualizada com sucesso' });
         });
     });
@@ -85,7 +86,7 @@ exports.deleteAccount = (req, res) => {
                 source: 'accounts',
                 action: 'deleted'
             });
-
+            triggerUpdate(familyId);
             res.json({ message: 'Conta excluída com sucesso' });
         });
     });

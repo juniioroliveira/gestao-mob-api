@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
+const { triggerUpdate } = require('../services/financialEventService');
 
 exports.getStatisticsData = (req, res) => {
     const familyId = req.user.family_id;
@@ -197,11 +198,13 @@ exports.createCategory = (req, res) => {
                 (err2) => {
                     if (err2) console.error('Erro ao salvar limite', err2);
                     getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'created' });
+                    triggerUpdate(familyId);
                     res.status(201).json({ message: 'Categoria criada com limite', id: categoryId });
                 }
             );
         } else {
             getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'created' });
+            triggerUpdate(familyId);
             res.status(201).json({ message: 'Categoria criada', id: categoryId });
         }
     });
@@ -237,10 +240,12 @@ exports.updateCategory = (req, res) => {
                 db.run(upsertLimit, [categoryId, currentMonth, currentYear, limit], (errLimit) => {
                     if (errLimit) console.error('Erro ao atualizar limite', errLimit);
                     getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'updated' });
+                    triggerUpdate(familyId);
                     res.json({ message: 'Categoria e limite atualizados' });
                 });
             } else {
                 getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'updated' });
+                triggerUpdate(familyId);
                 res.json({ message: 'Categoria atualizada' });
             }
         };
@@ -270,6 +275,7 @@ exports.deleteCategory = (req, res) => {
             if (this.changes === 0) return res.status(404).json({ error: 'Categoria não encontrada' });
             
             getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'deleted' });
+            triggerUpdate(familyId);
             res.json({ message: 'Categoria excluída com sucesso' });
         });
     });

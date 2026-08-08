@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const bcrypt = require('bcryptjs');
 const { getIo } = require('../websockets/socket');
+const { triggerUpdate } = require('../services/financialEventService');
 
 exports.inviteMember = async (req, res) => {
     const { email, name, role, isAdmin } = req.body;
@@ -40,6 +41,7 @@ exports.inviteMember = async (req, res) => {
                 return res.status(500).json({ error: 'Erro ao criar membro' });
             }
             getIo().to(`family_${familyId}`).emit('data_updated', { source: 'members', action: 'created' });
+            triggerUpdate(familyId);
             res.status(201).json({ message: 'Convite enviado (membro criado com senha padrão 123456)' });
         });
 
@@ -68,6 +70,7 @@ exports.deleteMember = (req, res) => {
                 return res.status(500).json({ error: 'Erro ao remover membro' });
             }
             getIo().to(`family_${familyId}`).emit('data_updated', { source: 'members', action: 'deleted' });
+            triggerUpdate(familyId);
             res.json({ message: 'Membro removido com sucesso' });
         });
     });
@@ -97,6 +100,7 @@ exports.updateMember = (req, res) => {
                 return res.status(500).json({ error: 'Erro ao atualizar membro' });
             }
             getIo().to(`family_${familyId}`).emit('data_updated', { source: 'members', action: 'updated' });
+            triggerUpdate(familyId);
             res.json({ message: 'Membro atualizado com sucesso' });
         });
     });

@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
+const { triggerUpdate } = require('../services/financialEventService');
 
 exports.getProfile = (req, res) => {
     const userId = req.user.id;
@@ -73,6 +74,7 @@ exports.updatePreferences = (req, res) => {
             console.error('Erro ao atualizar preferências:', err);
             return res.status(500).json({ error: 'Erro interno no servidor' });
         }
+        triggerUpdate(req.user.family_id);
         res.json({ message: 'Preferências atualizadas com sucesso!' });
     });
 };
@@ -110,7 +112,7 @@ exports.updateProfile = (req, res) => {
         }
 
         getIo().to(`family_${familyId}`).emit('data_updated', { source: 'profile', action: 'updated' });
-
+        triggerUpdate(familyId);
         res.json({ message: 'Perfil atualizado com sucesso!' });
     });
 };
@@ -132,7 +134,7 @@ exports.updateFamily = (req, res) => {
         }
 
         getIo().to(`family_${familyId}`).emit('data_updated', { source: 'family', action: 'updated' });
-
+        triggerUpdate(familyId);
         res.json({ message: 'Família atualizada com sucesso!' });
     });
 };
@@ -155,7 +157,7 @@ exports.updateAvatar = (req, res) => {
         }
 
         getIo().to(`family_${familyId}`).emit('data_updated', { source: 'profile', action: 'updated' });
-
+        triggerUpdate(familyId);
         res.json({ message: 'Avatar atualizado com sucesso!' });
     });
 };

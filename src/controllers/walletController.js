@@ -176,14 +176,12 @@ exports.getWalletData = (req, res) => {
     });
 };
 
-exports.getThermometerAIData = async (req, res) => {
-    const familyId = req.user.family_id;
+exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
     const monthStr = new Date().toISOString().slice(0, 7);
 
     try {
-        // Obter os dados básicos necessários usando Promises
         const queryPromise = (query, params) => {
             return new Promise((resolve, reject) => {
                 db.all(query, params, (err, rows) => {
@@ -193,7 +191,6 @@ exports.getThermometerAIData = async (req, res) => {
             });
         };
 
-        // Garante que a tabela de cache existe
         await queryPromise(`
             CREATE TABLE IF NOT EXISTS family_ai_cache (
                 family_id INT PRIMARY KEY,
@@ -201,7 +198,7 @@ exports.getThermometerAIData = async (req, res) => {
                 last_hash VARCHAR(64) NOT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        `);
+        `, []);
 
         // 1. Contas e Saldos
         const accounts = await queryPromise(`SELECT current_balance, type FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`, [familyId]);
@@ -247,42 +244,48 @@ exports.getThermometerAIData = async (req, res) => {
         const activeBills = await queryPromise(`SELECT amount, due_day, name, type FROM recurring_bills WHERE family_id = ? AND is_active = 1`, [familyId]);
         const totalFixedExpenses = activeBills.reduce((sum, item) => sum + (item.amount || 0), 0);
 
-        // 5b. Próximo Recebimento do Membro Logado
-        const loggedInMemberId = req.user.id;
-        const loggedInMemberRow = await queryPromise(`
-            SELECT name, monthly_income, salary_day, advance_value, advance_day 
-            FROM members 
-            WHERE id = ?
-        `, [loggedInMemberId]);
+        // 5b. Próximo Recebimento do Membro (usa o admin ou o primeiro se não for passado)
+        let memberToQuery = loggedInMemberId;
+        if (!memberToQuery && members.length > 0) {
+            memberToQuery = members[0].id; // Fallback se chamado do background job sem user logado específico
+        }
+
+        let loggedInMemberRow = [];
+        if (memberToQuery) {
+            loggedInMemberRow = await queryPromise(`
+                SELECT name, monthly_income, salary_day, advance_value, advance_day 
+                FROM members 
+                WHERE id = ?
+            `, [memberToQuery]);
+        }
 
         let nextPaymentInfo = null;
-        let totalUpcomingBills = 0; // Total a pagar até o próximo recebimento (Quinzena Atual)
-        let totalRemainingBillsThisMonth = 0; // Total a pagar até o fim do mês atual
+        let totalUpcomingBills = 0; 
+        let totalRemainingBillsThisMonth = 0; 
 
         const now = new Date();
         const currentDay = now.getDate();
-        const currentMonth = now.getMonth() + 1;
-        const currentYear = now.getFullYear();
+        const currentMonthNum = now.getMonth() + 1;
+        const currentYearNum = now.getFullYear();
 
         if (loggedInMemberRow && loggedInMemberRow.length > 0) {
             const member = loggedInMemberRow[0];
-
             const salaryDay = member.salary_day;
             const advanceDay = member.advance_day;
 
             const candidates = [];
             if (salaryDay && member.monthly_income > 0) {
-                let salDate = new Date(currentYear, currentMonth - 1, salaryDay);
+                let salDate = new Date(currentYearNum, currentMonthNum - 1, salaryDay);
                 if (salaryDay <= currentDay) {
-                    salDate = new Date(currentYear, currentMonth, salaryDay);
+                    salDate = new Date(currentYearNum, currentMonthNum, salaryDay);
                 }
                 candidates.push({ type: 'Salário', day: salaryDay, value: member.monthly_income, date: salDate });
             }
 
             if (advanceDay && member.advance_value > 0) {
-                let advDate = new Date(currentYear, currentMonth - 1, advanceDay);
+                let advDate = new Date(currentYearNum, currentMonthNum - 1, advanceDay);
                 if (advanceDay <= currentDay) {
-                    advDate = new Date(currentYear, currentMonth, advanceDay);
+                    advDate = new Date(currentYearNum, currentMonthNum, advanceDay);
                 }
                 candidates.push({ type: 'Adiantamento', day: advanceDay, value: member.advance_value, date: advDate });
             }
@@ -297,16 +300,15 @@ exports.getThermometerAIData = async (req, res) => {
                 activeBills.forEach(bill => {
                     const dueDay = bill.due_day;
                     if (dueDay) {
-                        let billDate = new Date(currentYear, currentMonth - 1, dueDay);
+                        let billDate = new Date(currentYearNum, currentMonthNum - 1, dueDay);
                         if (dueDay < currentDay) {
-                            billDate = new Date(currentYear, currentMonth, dueDay);
+                            billDate = new Date(currentYearNum, currentMonthNum, dueDay);
                         }
                         
-                        // Contas até 1 dia ANTES do próximo pagamento (Quinzena Atual)
                         const limitDate = new Date(nextRecDate);
                         limitDate.setDate(limitDate.getDate() - 1);
 
-                        if (billDate >= new Date(currentYear, currentMonth - 1, currentDay) && billDate <= limitDate) {
+                        if (billDate >= new Date(currentYearNum, currentMonthNum - 1, currentDay) && billDate <= limitDate) {
                             billsInInterval.push({
                                 name: bill.name,
                                 amount: bill.amount || 0,
@@ -315,9 +317,8 @@ exports.getThermometerAIData = async (req, res) => {
                             totalUpcomingBills += (bill.amount || 0);
                         }
                         
-                        // Contas pendentes até o final deste MÊS atual (para o Gasto Final Projetado)
-                        const endOfMonth = new Date(currentYear, currentMonth, 0);
-                        if (billDate >= new Date(currentYear, currentMonth - 1, currentDay) && billDate <= endOfMonth) {
+                        const endOfMonth = new Date(currentYearNum, currentMonthNum, 0);
+                        if (billDate >= new Date(currentYearNum, currentMonthNum - 1, currentDay) && billDate <= endOfMonth) {
                             totalRemainingBillsThisMonth += (bill.amount || 0);
                         }
                     }
@@ -335,7 +336,6 @@ exports.getThermometerAIData = async (req, res) => {
             }
         }
 
-        // Processar transações e categorias
         let familyTotalExpenses = 0;
         let familyExtraExpenses = 0;
         const categoryMap = {};
@@ -359,11 +359,9 @@ exports.getThermometerAIData = async (req, res) => {
         const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
         const daysRemaining = daysInMonth - currentDay + 1;
 
-        // Cálculo estrito e manual do Gasto Final Projetado (Apenas mês atual)
         const strictProjectedBalance = familyTotalIncome - familyTotalExpenses - totalRemainingBillsThisMonth;
         const strictIsInTheRed = strictProjectedBalance < 0;
 
-        // Gerar hash para cacheamento inteligente
         const cacheInput = JSON.stringify({
             totalBalance,
             familyTotalIncome,
@@ -378,38 +376,17 @@ exports.getThermometerAIData = async (req, res) => {
         });
         const dataHash = crypto.createHash('sha256').update(cacheInput).digest('hex');
 
-        // Verificar se existe no cache
+        // Verifica cache e retorna se já existe (para quando é chamado de background e nada mudou de verdade)
         const cached = await queryPromise(`SELECT cached_response, last_hash FROM family_ai_cache WHERE family_id = ?`, [familyId]);
         if (cached && cached.length > 0 && cached[0].last_hash === dataHash) {
-            console.log(`⚡ Retornando análise do Termômetro do cache para a família ${familyId}`);
-            try {
-                const aiJson = JSON.parse(cached[0].cached_response);
-                return res.json({
-                    useFallback: false,
-                    totalBalance,
-                    familyTotalIncome,
-                    familyTotalExpenses,
-                    daysRemaining,
-                    projectedLeftover: strictProjectedBalance,
-                    safeDailySpend: aiJson.safeDailySpend,
-                    isInTheRed: strictIsInTheRed,
-                    insights: aiJson.insights,
-                    upcomingFortnightBills: totalUpcomingBills,
-                    nextPaymentDate: nextPaymentInfo ? nextPaymentInfo.nextReceiptDate : null,
-                    nextPaymentValue: nextPaymentInfo ? nextPaymentInfo.nextReceiptValue : null
-                });
-            } catch (jsonErr) {
-                console.warn('⚠️ Erro ao fazer parse do JSON do cache, gerando nova análise.', jsonErr);
-            }
+            console.log(`⚡ Retornando análise do Termômetro do cache (Background check) para a família ${familyId}`);
+            return JSON.parse(cached[0].cached_response);
         }
 
-        // 6. Fazer a chamada ao Gemini se a chave estiver configurada
+        // 6. Chamada ao Gemini
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) {
-            return res.status(200).json({
-                useFallback: true,
-                message: "Chave da IA não configurada no .env"
-            });
+            throw new Error("Chave da IA não configurada no .env");
         }
 
         const { GoogleGenAI } = require('@google/genai');
@@ -420,15 +397,15 @@ Você é uma IA analista financeira do app "Gestão Mob".
 Sua tarefa é analisar o panorama financeiro de uma família e retornar um objeto JSON com diagnósticos e insights personalizados.
 
 Sua resposta deve ser EXCLUSIVAMENTE um objeto JSON válido com as seguintes chaves:
-1. "projectedBalance": (Number) A estimativa do saldo que sobrará (se positivo) ou faltará (se negativo) no final do mês baseado nas tendências de gastos.
+1. "projectedBalance": (Number) ignorado.
 2. "safeDailySpend": (Number) O limite de gasto diário recomendado para que a família termine o mês no azul.
-3. "isInTheRed": (Boolean) true se a estimativa projetada de saldo restante for negativa, false se for positiva.
+3. "isInTheRed": (Boolean) ignorado.
 4. "insights": Um array de no máximo 3 objetos, onde cada objeto de insight tem:
    - "title": (String) Título chamativo e curto (ex: "Custo Fixo Saudável", "Orçamento Estourado", "Alimentação Acelerada").
    - "type": (String) "red" para alertas graves, "green" para conquistas/diagnósticos saudáveis, "blue" ou "orange" para alertas médios ou informativos.
    - "description": (String) Descrição explicativa curta e acionável com o nome de quem gastou ou o que causou o padrão. Seja direto.
    
-Importante sobre o próximo recebimento: se fornecido no prompt o próximo recebimento do usuário logado e as contas a vencer antes dele, você deve gerar obrigatoriamente um insight/alerta do tipo 'orange' ou 'blue' com título chamativo (ex: "Atenção ao Dia X", "Programe seu Próximo Salário", "Proxima Meta de Contas"), indicando o total que vencerá antes do pagamento e se o saldo atual é suficiente para cobrir ou se ele precisará se planejar para esse dia.
+Importante sobre o próximo recebimento: se fornecido no prompt o próximo recebimento do usuário logado e as contas a vencer antes dele, você deve gerar obrigatoriamente um insight/alerta do tipo 'orange' ou 'blue' indicando o total que vencerá antes do pagamento e se o saldo atual é suficiente para cobrir.
 `;
 
         let loggedInMemberPrompt = '';
@@ -474,20 +451,7 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
         const aiResponseText = response.text.trim();
         const aiJson = JSON.parse(aiResponseText);
 
-        // Salvar/Atualizar no cache
-        try {
-            const existingCache = await queryPromise(`SELECT family_id FROM family_ai_cache WHERE family_id = ?`, [familyId]);
-            if (existingCache && existingCache.length > 0) {
-                await queryPromise(`UPDATE family_ai_cache SET cached_response = ?, last_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE family_id = ?`, [aiResponseText, dataHash, familyId]);
-            } else {
-                await queryPromise(`INSERT INTO family_ai_cache (family_id, cached_response, last_hash) VALUES (?, ?, ?)`, [familyId, aiResponseText, dataHash]);
-            }
-            console.log(`💾 Cache da análise atualizado para a família ${familyId}`);
-        } catch (cacheWriteErr) {
-            console.error('❌ Erro ao salvar cache no banco de dados:', cacheWriteErr);
-        }
-
-        res.json({
+        const finalResponsePayload = {
             useFallback: false,
             totalBalance,
             familyTotalIncome,
@@ -500,10 +464,57 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
             upcomingFortnightBills: totalUpcomingBills,
             nextPaymentDate: nextPaymentInfo ? nextPaymentInfo.nextReceiptDate : null,
             nextPaymentValue: nextPaymentInfo ? nextPaymentInfo.nextReceiptValue : null
-        });
+        };
+
+        const finalResponseJsonStr = JSON.stringify(finalResponsePayload);
+
+        try {
+            if (cached && cached.length > 0) {
+                await queryPromise(`UPDATE family_ai_cache SET cached_response = ?, last_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE family_id = ?`, [finalResponseJsonStr, dataHash, familyId]);
+            } else {
+                await queryPromise(`INSERT INTO family_ai_cache (family_id, cached_response, last_hash) VALUES (?, ?, ?)`, [familyId, finalResponseJsonStr, dataHash]);
+            }
+            console.log(`💾 Cache da análise atualizado para a família ${familyId}`);
+        } catch (cacheWriteErr) {
+            console.error('❌ Erro ao salvar cache no banco de dados:', cacheWriteErr);
+        }
+
+        return finalResponsePayload;
 
     } catch (err) {
-        console.error('Erro na análise da IA do Termômetro:', err);
+        console.error('Erro na análise da IA do Termômetro em background:', err);
+        throw err;
+    }
+};
+
+exports.getThermometerAIData = async (req, res) => {
+    const familyId = req.user.family_id;
+
+    try {
+        const queryPromise = (query, params) => {
+            return new Promise((resolve, reject) => {
+                db.all(query, params, (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                });
+            });
+        };
+
+        const cached = await queryPromise(`SELECT cached_response FROM family_ai_cache WHERE family_id = ?`, [familyId]);
+        
+        if (cached && cached.length > 0) {
+            // Serve instantaneamente
+            const payload = JSON.parse(cached[0].cached_response);
+            return res.json(payload);
+        }
+
+        // Se estiver vazio (primeira vez ever), forçamos e esperamos
+        console.log(`⚠️ Cache vazio para familia ${familyId}, calculando sincronicamente pela primeira vez...`);
+        const payload = await exports.forceUpdateAICache(familyId, req.user.id);
+        return res.json(payload);
+
+    } catch (err) {
+        console.error('Erro ao buscar IA do Termômetro do cache:', err);
         res.status(200).json({
             useFallback: true,
             error: err.message

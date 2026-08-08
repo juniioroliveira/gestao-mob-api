@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
+const { triggerUpdate } = require('../services/financialEventService');
 const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
 const { parseOFX } = require('../utils/ofxParser');
 
@@ -268,7 +269,7 @@ exports.createTransaction = async (req, res) => {
                 action: 'created'
             });
         }
-
+        triggerUpdate(familyId);
         res.status(201).json({ message: 'Transação criada com sucesso', id: firstResultId });
     } catch (err) {
         console.error('Erro ao adicionar transação:', err);
@@ -363,7 +364,7 @@ exports.updateTransaction = async (req, res) => {
                 action: 'updated'
             });
         }
-
+        triggerUpdate(familyId);
         res.json({ message: 'Transação atualizada com sucesso' });
     } catch (err) {
         console.error('Erro ao atualizar transação:', err);
@@ -399,6 +400,7 @@ exports.deleteTransaction = (req, res) => {
                             action: 'deleted'
                         });
                     }
+                    triggerUpdate(familyId);
                 };
 
                 // 3. Reverter o saldo da conta
@@ -470,7 +472,7 @@ exports.clearTransactions = async (req, res) => {
                 action: 'updated'
             });
         }
-
+        triggerUpdate(familyId);
         res.json({ message: 'Todos os lançamentos foram limpos e os saldos foram zerados com sucesso' });
     } catch (err) {
         console.error('Erro ao limpar lançamentos:', err);
@@ -698,6 +700,7 @@ exports.importOFX = async (req, res) => {
                             action: 'updated'
                         });
                     }
+                    triggerUpdate(familyId);
 
                     // Se houver mais lotes, esperar 4 segundos para respeitar a cota do Gemini (Free Tier Rate Limit)
                     if (i + batchSize < newTxList.length) {
@@ -719,6 +722,7 @@ exports.importOFX = async (req, res) => {
                         status: 'COMPLETED'
                     });
                 }
+                triggerUpdate(familyId);
 
             } catch (bgError) {
                 console.error('Erro no processamento em background do OFX:', bgError);
