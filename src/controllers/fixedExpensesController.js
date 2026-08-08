@@ -5,6 +5,12 @@ const { triggerUpdate } = require('../services/financialEventService');
 exports.getFixedExpenses = (req, res) => {
     const familyId = req.user.family_id;
     const filterType = req.query.type;
+    const month = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
+    const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
+
+    // Convert filter month/year to a comparable date format (last day of the month) for start/end date checks
+    const targetMonthEndStr = `${year}-${String(month).padStart(2, '0')}-${new Date(year, month, 0).getDate()}`;
+    const targetMonthStartStr = `${year}-${String(month).padStart(2, '0')}-01`;
 
     let query = `
         SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
@@ -12,19 +18,29 @@ exports.getFixedExpenses = (req, res) => {
                c.name as category_name, c.color_hex as category_color,
                (SELECT COUNT(*) FROM transactions t 
                 WHERE t.recurring_bill_id = rb.id 
-                AND MONTH(t.transaction_date) = MONTH(CURRENT_DATE()) 
-                AND YEAR(t.transaction_date) = YEAR(CURRENT_DATE())
+                AND MONTH(t.transaction_date) = ?
+                AND YEAR(t.transaction_date) = ?
                ) as is_paid_this_month
         FROM recurring_bills rb
         JOIN categories c ON rb.category_id = c.id
         WHERE rb.family_id = ?
     `;
-    const params = [familyId];
+    const params = [month, year, familyId];
 
     if (filterType) {
         query += ` AND rb.type = ?`;
         params.push(filterType);
     }
+
+    // Filter variables by date
+    query += ` AND (
+        rb.type != 'VARIABLE' OR 
+        (
+            (rb.start_date IS NULL OR rb.start_date <= ?) AND 
+            (rb.end_date IS NULL OR rb.end_date >= ?)
+        )
+    )`;
+    params.push(targetMonthEndStr, targetMonthStartStr);
     
     query += ` ORDER BY rb.due_day ASC`;
 
