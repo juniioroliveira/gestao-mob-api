@@ -4,7 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const documentController = require('../controllers/documentController');
-const { verifyToken } = require('../middlewares/authMiddleware');
+const authenticateToken = require('../middlewares/authMiddleware');
 
 // Ensure upload directory exists
 const uploadDir = path.join(__dirname, '../../uploads');
@@ -29,8 +29,8 @@ const upload = multer({
 });
 
 // Routes
-router.post('/upload', verifyToken, upload.single('document'), documentController.uploadDocument);
-router.get('/inbox', verifyToken, documentController.getInboxDocuments);
-router.delete('/:id', verifyToken, documentController.deleteDocument);
+router.post('/upload', authenticateToken, upload.single('document'), documentController.uploadDocument);
+router.get('/inbox', authenticateToken, documentController.getInboxDocuments);
+router.delete('/:id', authenticateToken, documentController.deleteDocument);
 
 module.exports = router;
