@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const path = require('path');
 const cors = require('cors');
 require('dotenv').config();
 
@@ -16,6 +17,7 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Aumentado para suportar imagens base64
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Rotas do Aplicativo 
 const testRoutes = require('./routes/testRoutes');
@@ -31,6 +33,8 @@ const accountRoutes = require('./routes/accountRoutes');
 const bankRoutes = require('./routes/bankRoutes');
 
 // Registrando as Rotas
+const documentRoutes = require('./routes/documentRoutes');
+
 app.use('/api/test', testRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/home', homeRoutes);
@@ -42,6 +46,7 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/members', memberRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/banks', bankRoutes);
+app.use('/api/documents', documentRoutes);
 
 // Configurando o Socket.io passando o servidor HTTP nativo
 initWebSockets(server);
