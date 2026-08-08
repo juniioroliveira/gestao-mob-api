@@ -2,7 +2,7 @@ const db = require('../config/database');
 const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
 const { triggerUpdate } = require('../services/financialEventService');
 
-exports.getFixedExpenses = (req, res) => {
+exports.getFixedExpenses = async (req, res) => {
     const familyId = req.user.family_id;
     const filterType = req.query.type;
     const month = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
@@ -44,7 +44,12 @@ exports.getFixedExpenses = (req, res) => {
     
     query += ` ORDER BY rb.due_day ASC`;
 
-    db.all(query, params, (err, rows) => {
+    const queryPromise = (q, p) => new Promise((resolve, reject) => {
+        db.all(q, p, (err, rows) => err ? reject(err) : resolve(rows));
+    });
+
+    try {
+        const rows = await queryPromise(query, params);
         if (err) {
             console.error('Erro ao buscar contas fixas:', err);
             return res.status(500).json({ error: 'Erro interno no servidor' });
@@ -125,10 +130,120 @@ exports.getFixedExpenses = (req, res) => {
                     installmentLabel: row.total_installments ? `Parcela ${row.current_installment}/${row.total_installments}` : null
                 };
             });
+            // Fetch Credit Cards and sum their transactions for the month
+            const creditCards = await queryPromise(`
+                SELECT id, name, closing_day, due_day, color_hex
+                FROM accounts 
+                WHERE family_id = ? AND is_credit = 1
+            `, [familyId]);
+
+            for (const card of creditCards) {
+                // Calculate billing cycle start and end based on requested month/year
+                // For simplicity, we consider transactions where the month/year matches the "fatura" month
+                // Emulating statisticsController logic:
+                // Se fechamento = 15. Transações a partir de 15 do mes M-1 ate 14 do mes M entram na fatura do mes M se due_day > 15
+                // Simplest approach right now to match the "Termometro" is exact same logic as homeController:
+                // We sum where DATE_FORMAT is current, or we use the custom logic:
+                const cardTransactions = await queryPromise(`
+                    SELECT SUM(amount) as total_spent
+                    FROM transactions 
+                    WHERE account_id = ? AND type = 'EXPENSE'
+                    AND (
+                        (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31) AND COALESCE(?, 1) >= COALESCE(?, 31))
+                        OR 
+                        (
+                            (
+                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) >= COALESCE(?, 31))
+                                OR 
+                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31))
+                            )
+                            AND COALESCE(?, 1) < COALESCE(?, 31)
+                        )
+                    )
+                `, [
+                    card.id,
+                    month, year, card.closing_day, card.due_day, card.closing_day,
+                    month === 1 ? 12 : month - 1, month === 1 ? year - 1 : year, card.closing_day,
+                    month, year, card.closing_day,
+                    card.due_day, card.closing_day
+                ]);
+
+                // Also subtract INCOME (refunds)
+                const cardIncomes = await queryPromise(`
+                    SELECT SUM(amount) as total_refund
+                    FROM transactions 
+                    WHERE account_id = ? AND type = 'INCOME'
+                    AND (
+                        (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31) AND COALESCE(?, 1) >= COALESCE(?, 31))
+                        OR 
+                        (
+                            (
+                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) >= COALESCE(?, 31))
+                                OR 
+                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31))
+                            )
+                            AND COALESCE(?, 1) < COALESCE(?, 31)
+                        )
+                    )
+                `, [
+                    card.id,
+                    month, year, card.closing_day, card.due_day, card.closing_day,
+                    month === 1 ? 12 : month - 1, month === 1 ? year - 1 : year, card.closing_day,
+                    month, year, card.closing_day,
+                    card.due_day, card.closing_day
+                ]);
+
+                const spent = (cardTransactions[0].total_spent || 0) - (cardIncomes[0].total_refund || 0);
+
+                if (spent > 0) {
+                    const today = new Date();
+                    const currentDay = today.getDate();
+                    let invoiceStatus = 'Pendente';
+                    let invoiceColor = '#2196F3';
+
+                    if (card.due_day) {
+                        if (card.due_day < currentDay) {
+                            invoiceStatus = 'Atrasado';
+                            invoiceColor = '#F44336';
+                        } else if (card.due_day - currentDay <= 5 && card.due_day - currentDay >= 0) {
+                            invoiceStatus = 'Vence em breve';
+                            invoiceColor = '#FF9800';
+                        }
+                    }
+
+                    expenses.push({
+                        id: \`invoice_\${card.id}\`,
+                        title: \`Fatura - \${card.name}\`,
+                        amount: spent,
+                        rawAmount: spent,
+                        dueDate: card.due_day ? \`Dia \${card.due_day}\` : 'S/ Data',
+                        dueDay: card.due_day || 31,
+                        isAutoPay: false,
+                        isActive: true,
+                        categoryId: null,
+                        categoryName: 'Cartão de Crédito',
+                        categoryColor: card.color_hex || '#9E9E9E',
+                        memberId: null,
+                        accountId: card.id,
+                        paymentType: 'CREDIT_CARD',
+                        ownerName: 'Casa',
+                        ownerAvatars: [],
+                        status: invoiceStatus,
+                        statusColor: invoiceColor,
+                        type: 'CREDIT_INVOICE'
+                    });
+                }
+            }
+            
+            // Sort expenses again to include invoices in the correct due day order
+            expenses.sort((a, b) => a.dueDay - b.dueDay);
 
             res.json({ expenses });
         });
-    });
+    } catch (err) {
+        console.error('Erro ao buscar contas fixas:', err);
+        return res.status(500).json({ error: 'Erro interno no servidor' });
+    }
 };
 
 exports.createFixedExpense = async (req, res) => {
