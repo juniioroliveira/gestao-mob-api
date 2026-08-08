@@ -50,13 +50,9 @@ exports.getFixedExpenses = async (req, res) => {
 
     try {
         const rows = await queryPromise(query, params);
-        if (err) {
-            console.error('Erro ao buscar contas fixas:', err);
-            return res.status(500).json({ error: 'Erro interno no servidor' });
-        }
 
-        db.all(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId], (err2, membersRows) => {
-            const members = membersRows || [];
+        const membersRows = await queryPromise(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId]);
+        const members = membersRows || [];
 
             const expenses = rows.map(row => {
                 let ownerName = 'Casa';
@@ -212,11 +208,11 @@ exports.getFixedExpenses = async (req, res) => {
                     }
 
                     expenses.push({
-                        id: \`invoice_\${card.id}\`,
-                        title: \`Fatura - \${card.name}\`,
+                        id: `invoice_${card.id}`,
+                        title: `Fatura - ${card.name}`,
                         amount: spent,
                         rawAmount: spent,
-                        dueDate: card.due_day ? \`Dia \${card.due_day}\` : 'S/ Data',
+                        dueDate: card.due_day ? `Dia ${card.due_day}` : 'S/ Data',
                         dueDay: card.due_day || 31,
                         isAutoPay: false,
                         isActive: true,
@@ -239,7 +235,6 @@ exports.getFixedExpenses = async (req, res) => {
             expenses.sort((a, b) => a.dueDay - b.dueDay);
 
             res.json({ expenses });
-        });
     } catch (err) {
         console.error('Erro ao buscar contas fixas:', err);
         return res.status(500).json({ error: 'Erro interno no servidor' });
