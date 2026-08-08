@@ -275,65 +275,101 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
 
             const candidates = [];
             if (salaryDay && member.monthly_income > 0) {
-                let salDate = new Date(currentYearNum, currentMonthNum - 1, salaryDay);
-                if (salaryDay <= currentDay) {
-                    salDate = new Date(currentYearNum, currentMonthNum, salaryDay);
-                }
-                candidates.push({ type: 'Salário', day: salaryDay, value: member.monthly_income, date: salDate });
+                candidates.push({ type: 'Salário', day: salaryDay, value: member.monthly_income });
             }
-
             if (advanceDay && member.advance_value > 0) {
-                let advDate = new Date(currentYearNum, currentMonthNum - 1, advanceDay);
-                if (advanceDay <= currentDay) {
-                    advDate = new Date(currentYearNum, currentMonthNum, advanceDay);
-                }
-                candidates.push({ type: 'Adiantamento', day: advanceDay, value: member.advance_value, date: advDate });
+                candidates.push({ type: 'Adiantamento', day: advanceDay, value: member.advance_value });
             }
+            candidates.sort((a, b) => a.day - b.day);
 
-            candidates.sort((a, b) => a.date - b.date);
-            let nextRec = candidates.length > 0 ? candidates[0] : null;
+            const futureCandidates = candidates.filter(c => c.day >= currentDay);
 
-            if (nextRec) {
-                const nextRecDate = nextRec.date;
-                const billsInInterval = [];
+            let cashflowCycles = [];
+            let currentRunningBalance = totalBalance;
+            let lastProcessedDay = currentDay;
 
+            // Helper to sum bills in range [startDay, endDay]
+            const getBillsInRange = (startDay, endDay) => {
+                let sum = 0;
+                let list = [];
                 activeBills.forEach(bill => {
-                    const dueDay = bill.due_day;
-                    if (dueDay) {
-                        let billDate = new Date(currentYearNum, currentMonthNum - 1, dueDay);
-                        if (dueDay < currentDay) {
-                            billDate = new Date(currentYearNum, currentMonthNum, dueDay);
-                        }
-                        
-                        const limitDate = new Date(nextRecDate);
-                        limitDate.setDate(limitDate.getDate() - 1);
-
-                        if (billDate >= new Date(currentYearNum, currentMonthNum - 1, currentDay) && billDate <= limitDate) {
-                            billsInInterval.push({
-                                name: bill.name,
-                                amount: bill.amount || 0,
-                                dueDay: dueDay
-                            });
-                            totalUpcomingBills += (bill.amount || 0);
-                        }
-                        
-                        const endOfMonth = new Date(currentYearNum, currentMonthNum, 0);
-                        if (billDate >= new Date(currentYearNum, currentMonthNum - 1, currentDay) && billDate <= endOfMonth) {
-                            totalRemainingBillsThisMonth += (bill.amount || 0);
-                        }
+                    const d = bill.due_day;
+                    if (d && d >= startDay && d <= endDay) {
+                        sum += (bill.amount || 0);
+                        list.push({ name: bill.name, amount: bill.amount || 0, dueDay: d });
                     }
                 });
+                return { sum, list };
+            };
 
-                nextPaymentInfo = {
-                    memberName: member.name,
-                    nextReceiptType: nextRec.type,
-                    nextReceiptDay: nextRec.day,
-                    nextReceiptValue: nextRec.value,
-                    nextReceiptDate: nextRec.date.toISOString(),
-                    upcomingBills: billsInInterval,
-                    totalUpcomingBills
-                };
+            // Calculate cycles before each future receipt
+            for (let i = 0; i < futureCandidates.length; i++) {
+                let cand = futureCandidates[i];
+                let cycleEndDay = cand.day - 1;
+
+                if (cycleEndDay >= lastProcessedDay) {
+                    const bills = getBillsInRange(lastProcessedDay, cycleEndDay);
+                    let finalBalance = currentRunningBalance - bills.sum;
+                    cashflowCycles.push({
+                        name: `Até dia ${cycleEndDay}`,
+                        startDay: lastProcessedDay,
+                        endDay: cycleEndDay,
+                        initialBalance: currentRunningBalance,
+                        income: 0,
+                        incomeName: '',
+                        billsTotal: bills.sum,
+                        billsList: bills.list,
+                        projectedBalance: finalBalance
+                    });
+                    currentRunningBalance = finalBalance;
+                    lastProcessedDay = cand.day;
+                }
+                
+                // Add the income on the candidate day to the running balance
+                // Wait, it's better to just start the next cycle WITH this income
+                // We'll let the next iteration (or the EOM block) handle the period starting with this income
             }
+
+            // Final cycle (from lastProcessedDay to EOM)
+            const daysInCurrentMonth = new Date(currentYearNum, currentMonthNum, 0).getDate();
+            if (lastProcessedDay <= daysInCurrentMonth) {
+                // Determine incomes that hit exactly on lastProcessedDay or later
+                // Actually, any future candidate that hasn't been consumed as an income in a cycle yet.
+                // It's simpler: for this final cycle, the income is the sum of all futureCandidates that hit on lastProcessedDay.
+                let cycleIncomes = futureCandidates.filter(c => c.day >= lastProcessedDay);
+                let totalIncome = cycleIncomes.reduce((sum, c) => sum + c.value, 0);
+                let incomeNames = cycleIncomes.map(c => c.type).join(' + ');
+
+                const bills = getBillsInRange(lastProcessedDay, daysInCurrentMonth);
+                let finalBalance = currentRunningBalance + totalIncome - bills.sum;
+                
+                cashflowCycles.push({
+                    name: `Fim do Mês (Dia ${lastProcessedDay}-${daysInCurrentMonth})`,
+                    startDay: lastProcessedDay,
+                    endDay: daysInCurrentMonth,
+                    initialBalance: currentRunningBalance,
+                    income: totalIncome,
+                    incomeName: incomeNames,
+                    billsTotal: bills.sum,
+                    billsList: bills.list,
+                    projectedBalance: finalBalance
+                });
+                currentRunningBalance = finalBalance;
+            }
+            
+            // To maintain compatibility with old payload just in case, we can keep totalUpcomingBills 
+            // as the bills of the very first cycle.
+            if (cashflowCycles.length > 0) {
+                totalUpcomingBills = cashflowCycles[0].billsTotal;
+            }
+
+            // Calculate totalRemainingBillsThisMonth for strict calculation
+            totalRemainingBillsThisMonth = getBillsInRange(currentDay, daysInCurrentMonth).sum;
+
+            nextPaymentInfo = {
+                memberName: member.name,
+                cycles: cashflowCycles
+            };
         }
 
         let familyTotalExpenses = 0;
@@ -409,15 +445,17 @@ Importante sobre o próximo recebimento: se fornecido no prompt o próximo receb
 `;
 
         let loggedInMemberPrompt = '';
-        if (nextPaymentInfo) {
+        if (nextPaymentInfo && nextPaymentInfo.cycles) {
             loggedInMemberPrompt = `
-Dados de Recebimento do Usuário Logado (${nextPaymentInfo.memberName}):
-- Próximo recebimento previsto: ${nextPaymentInfo.nextReceiptType} no dia ${nextPaymentInfo.nextReceiptDay} (Valor: R$ ${nextPaymentInfo.nextReceiptValue.toFixed(2)})
-- Contas fixas da família que vencem até esta data de recebimento:
-${nextPaymentInfo.upcomingBills.length > 0 
-    ? nextPaymentInfo.upcomingBills.map(b => `  * ${b.name} (Vence dia ${b.dueDay}): R$ ${b.amount.toFixed(2)}`).join('\n')
-    : '  * Nenhuma conta fixa vencendo até lá.'}
-- Valor total das contas fixas que vencem antes do recebimento: R$ ${nextPaymentInfo.totalUpcomingBills.toFixed(2)}
+Dados de Ciclos de Fluxo de Caixa do Usuário Logado (${nextPaymentInfo.memberName}):
+${nextPaymentInfo.cycles.map((c, index) => `
+Ciclo ${index + 1} (${c.name}):
+- Saldo Inicial Projetado: R$ ${c.initialBalance.toFixed(2)}
+- Entradas no Período: R$ ${c.income.toFixed(2)} ${c.incomeName ? '(' + c.incomeName + ')' : ''}
+- Total de Contas no Período: R$ ${c.billsTotal.toFixed(2)}
+- Saldo Final Projetado: R$ ${c.projectedBalance.toFixed(2)}
+- Contas: ${c.billsList.length > 0 ? c.billsList.map(b => `${b.name} (R$ ${b.amount.toFixed(2)})`).join(', ') : 'Nenhuma'}
+`).join('\n')}
 `;
         }
 
@@ -462,8 +500,7 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
             isInTheRed: strictIsInTheRed,
             insights: aiJson.insights,
             upcomingFortnightBills: totalUpcomingBills,
-            nextPaymentDate: nextPaymentInfo ? nextPaymentInfo.nextReceiptDate : null,
-            nextPaymentValue: nextPaymentInfo ? nextPaymentInfo.nextReceiptValue : null
+            cashflowCycles: nextPaymentInfo ? nextPaymentInfo.cycles : []
         };
 
         const finalResponseJsonStr = JSON.stringify(finalResponsePayload);
