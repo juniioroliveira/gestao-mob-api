@@ -243,9 +243,9 @@ exports.getThermometerAIData = async (req, res) => {
             ) = ?
         `, [familyId, monthStr]);
 
-        // 5. Contas Fixas
-        const fixedExpenses = await queryPromise(`SELECT amount, due_day, name FROM recurring_bills WHERE family_id = ? AND is_active = 1`, [familyId]);
-        const totalFixedExpenses = fixedExpenses.reduce((sum, item) => sum + (item.amount || 0), 0);
+        // 5. Contas (Fixas e Variáveis)
+        const activeBills = await queryPromise(`SELECT amount, due_day, name, type FROM recurring_bills WHERE family_id = ? AND is_active = 1`, [familyId]);
+        const totalFixedExpenses = activeBills.reduce((sum, item) => sum + (item.amount || 0), 0);
 
         // 5b. Próximo Recebimento do Membro Logado
         const loggedInMemberId = req.user.id;
@@ -256,12 +256,16 @@ exports.getThermometerAIData = async (req, res) => {
         `, [loggedInMemberId]);
 
         let nextPaymentInfo = null;
+        let totalUpcomingBills = 0; // Total a pagar até o próximo recebimento (Quinzena Atual)
+        let totalRemainingBillsThisMonth = 0; // Total a pagar até o fim do mês atual
+
+        const now = new Date();
+        const currentDay = now.getDate();
+        const currentMonth = now.getMonth() + 1;
+        const currentYear = now.getFullYear();
+
         if (loggedInMemberRow && loggedInMemberRow.length > 0) {
             const member = loggedInMemberRow[0];
-            const now = new Date();
-            const currentDay = now.getDate();
-            const currentMonth = now.getMonth() + 1;
-            const currentYear = now.getFullYear();
 
             const salaryDay = member.salary_day;
             const advanceDay = member.advance_day;
@@ -269,7 +273,7 @@ exports.getThermometerAIData = async (req, res) => {
             const candidates = [];
             if (salaryDay && member.monthly_income > 0) {
                 let salDate = new Date(currentYear, currentMonth - 1, salaryDay);
-                if (salaryDay < currentDay) {
+                if (salaryDay <= currentDay) {
                     salDate = new Date(currentYear, currentMonth, salaryDay);
                 }
                 candidates.push({ type: 'Salário', day: salaryDay, value: member.monthly_income, date: salDate });
@@ -277,22 +281,20 @@ exports.getThermometerAIData = async (req, res) => {
 
             if (advanceDay && member.advance_value > 0) {
                 let advDate = new Date(currentYear, currentMonth - 1, advanceDay);
-                if (advanceDay < currentDay) {
+                if (advanceDay <= currentDay) {
                     advDate = new Date(currentYear, currentMonth, advanceDay);
                 }
                 candidates.push({ type: 'Adiantamento', day: advanceDay, value: member.advance_value, date: advDate });
             }
 
             candidates.sort((a, b) => a.date - b.date);
-
             let nextRec = candidates.length > 0 ? candidates[0] : null;
 
             if (nextRec) {
                 const nextRecDate = nextRec.date;
                 const billsInInterval = [];
-                let totalUpcomingBills = 0;
 
-                fixedExpenses.forEach(bill => {
+                activeBills.forEach(bill => {
                     const dueDay = bill.due_day;
                     if (dueDay) {
                         let billDate = new Date(currentYear, currentMonth - 1, dueDay);
@@ -300,13 +302,23 @@ exports.getThermometerAIData = async (req, res) => {
                             billDate = new Date(currentYear, currentMonth, dueDay);
                         }
                         
-                        if (billDate >= new Date(currentYear, currentMonth - 1, currentDay) && billDate <= nextRecDate) {
+                        // Contas até 1 dia ANTES do próximo pagamento (Quinzena Atual)
+                        const limitDate = new Date(nextRecDate);
+                        limitDate.setDate(limitDate.getDate() - 1);
+
+                        if (billDate >= new Date(currentYear, currentMonth - 1, currentDay) && billDate <= limitDate) {
                             billsInInterval.push({
                                 name: bill.name,
                                 amount: bill.amount || 0,
                                 dueDay: dueDay
                             });
                             totalUpcomingBills += (bill.amount || 0);
+                        }
+                        
+                        // Contas pendentes até o final deste MÊS atual (para o Gasto Final Projetado)
+                        const endOfMonth = new Date(currentYear, currentMonth, 0);
+                        if (billDate >= new Date(currentYear, currentMonth - 1, currentDay) && billDate <= endOfMonth) {
+                            totalRemainingBillsThisMonth += (bill.amount || 0);
                         }
                     }
                 });
@@ -316,6 +328,7 @@ exports.getThermometerAIData = async (req, res) => {
                     nextReceiptType: nextRec.type,
                     nextReceiptDay: nextRec.day,
                     nextReceiptValue: nextRec.value,
+                    nextReceiptDate: nextRec.date.toISOString(),
                     upcomingBills: billsInInterval,
                     totalUpcomingBills
                 };
@@ -343,10 +356,12 @@ exports.getThermometerAIData = async (req, res) => {
         });
 
         const crypto = require('crypto');
-        const now = new Date();
         const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-        const currentDay = now.getDate();
         const daysRemaining = daysInMonth - currentDay + 1;
+
+        // Cálculo estrito e manual do Gasto Final Projetado (Apenas mês atual)
+        const strictProjectedBalance = familyTotalIncome - familyTotalExpenses - totalRemainingBillsThisMonth;
+        const strictIsInTheRed = strictProjectedBalance < 0;
 
         // Gerar hash para cacheamento inteligente
         const cacheInput = JSON.stringify({
@@ -375,10 +390,13 @@ exports.getThermometerAIData = async (req, res) => {
                     familyTotalIncome,
                     familyTotalExpenses,
                     daysRemaining,
-                    projectedLeftover: aiJson.projectedBalance,
+                    projectedLeftover: strictProjectedBalance,
                     safeDailySpend: aiJson.safeDailySpend,
-                    isInTheRed: aiJson.isInTheRed,
-                    insights: aiJson.insights
+                    isInTheRed: strictIsInTheRed,
+                    insights: aiJson.insights,
+                    upcomingFortnightBills: totalUpcomingBills,
+                    nextPaymentDate: nextPaymentInfo ? nextPaymentInfo.nextReceiptDate : null,
+                    nextPaymentValue: nextPaymentInfo ? nextPaymentInfo.nextReceiptValue : null
                 });
             } catch (jsonErr) {
                 console.warn('⚠️ Erro ao fazer parse do JSON do cache, gerando nova análise.', jsonErr);
@@ -475,10 +493,13 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
             familyTotalIncome,
             familyTotalExpenses,
             daysRemaining,
-            projectedLeftover: aiJson.projectedBalance,
+            projectedLeftover: strictProjectedBalance,
             safeDailySpend: aiJson.safeDailySpend,
-            isInTheRed: aiJson.isInTheRed,
-            insights: aiJson.insights
+            isInTheRed: strictIsInTheRed,
+            insights: aiJson.insights,
+            upcomingFortnightBills: totalUpcomingBills,
+            nextPaymentDate: nextPaymentInfo ? nextPaymentInfo.nextReceiptDate : null,
+            nextPaymentValue: nextPaymentInfo ? nextPaymentInfo.nextReceiptValue : null
         });
 
     } catch (err) {
