@@ -117,7 +117,7 @@ async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) 
     const accountsList = accounts.map(a => ({ id: a.id, name: a.name }));
     
     const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
-Sua tarefa é analisar o comprovante bancário (imagem ou PDF) e extrair os dados da transação.
+Sua tarefa é analisar a imagem enviada (que pode ser um comprovante bancário oficial, um PDF, ou um Print/Screenshot da tela do aplicativo do banco mostrando o extrato/transação) e extrair os dados da transação.
 Retorne um objeto JSON estrito com os seguintes campos exatos:
 - "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
 - "amount": Valor da transação (Número Float, utilize ponto para decimais, não use vírgulas).
