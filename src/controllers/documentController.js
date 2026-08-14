@@ -114,13 +114,17 @@ exports.reprocessDocument = (req, res) => {
     db.get(`SELECT * FROM inbox_documents WHERE id = ? AND family_id = ?`, [documentId, familyId], (err, row) => {
         if (err || !row) return res.status(404).json({ error: 'Documento não encontrado' });
 
-        if (row.file_path === 'db_base64' || !row.file_path.startsWith('uploads')) {
-            return res.status(400).json({ error: 'Este documento é antigo e não suporta reprocessamento.' });
+        if (row.file_path !== 'db_base64' && !row.file_path.startsWith('uploads')) {
+            return res.status(400).json({ error: 'Formato de arquivo não suportado para reprocessamento.' });
         }
 
-        const fullPath = path.join(__dirname, '../../', row.file_path);
-        if (!fs.existsSync(fullPath)) {
-            return res.status(404).json({ error: 'Arquivo da imagem não encontrado no disco.' });
+        if (row.file_path !== 'db_base64') {
+            const fullPath = path.join(__dirname, '../../', row.file_path);
+            if (!fs.existsSync(fullPath)) {
+                return res.status(404).json({ error: 'Arquivo da imagem não encontrado no disco.' });
+            }
+        } else if (!row.file_base64) {
+            return res.status(404).json({ error: 'Arquivo base64 não encontrado no banco.' });
         }
 
         db.run(
@@ -139,7 +143,13 @@ exports.reprocessDocument = (req, res) => {
 
                 // Inicia em background
                 try {
-                    const fileBuffer = fs.readFileSync(fullPath);
+                    let fileBuffer;
+                    if (row.file_path === 'db_base64') {
+                        fileBuffer = Buffer.from(row.file_base64, 'base64');
+                    } else {
+                        const fullPath = path.join(__dirname, '../../', row.file_path);
+                        fileBuffer = fs.readFileSync(fullPath);
+                    }
                     const mimeType = row.file_type === 'pdf' ? 'application/pdf' : 'image/png';
                     const { processDocumentAsync } = require('./inboxController');
                     processDocumentAsync(documentId, familyId, memberId, fileBuffer, mimeType).catch(() => {});
