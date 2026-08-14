@@ -93,6 +93,14 @@ exports.processUpload = async (req, res) => {
 
         triggerUpdate(familyId);
 
+        // Disparar evento WebSocket para o Frontend atualizar a tela em tempo real
+        const { getIo } = require('../websockets/socket');
+        const io = getIo();
+        io.to(`family_${familyId}`).emit('data_updated', {
+            message: 'Comprovante processado pela IA!',
+            source: 'inbox_ai'
+        });
+
         res.status(200).json({ message: 'Comprovante processado e transação cadastrada com sucesso!' });
     } catch (error) {
         console.error('Erro no processUpload:', error);
