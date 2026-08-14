@@ -73,42 +73,25 @@ exports.processUpload = async (req, res) => {
         const amount = aiResult.amount || 0.0;
         const date = aiResult.date || new Date().toISOString().split('T')[0];
 
-        const insertQuery = `
-            INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-        
-        await runQuery(insertQuery, [
+        // Mapear a saída da IA para o body esperado pelo transactionController
+        req.body = {
             accountId,
-            null,
-            JSON.stringify([memberId]), 
+            destinationAccountId: null,
+            memberId: [memberId],
             categoryId,
             amount,
             type,
             description,
             date,
-            true, 
-            'PIX'
-        ]);
+            paymentType: 'PIX',
+            installments: 1,
+            is_ai_processed: true
+        };
 
-        // Atualizar saldo da conta correspondente
-        if (type === 'EXPENSE') {
-            await runQuery(`UPDATE accounts SET current_balance = current_balance - ? WHERE id = ? AND family_id = ?`, [amount, accountId, familyId]);
-        } else if (type === 'INCOME') {
-            await runQuery(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, [amount, accountId, familyId]);
-        }
+        // Delegar a criação para o controller padrão (garante reuso de atualização de saldo, WebSocket e background AI)
+        const transactionController = require('./transactionController');
+        return await transactionController.createTransaction(req, res);
 
-        triggerUpdate(familyId);
-
-        // Disparar evento WebSocket para o Frontend atualizar a tela em tempo real
-        const { getIo } = require('../websockets/socket');
-        const io = getIo();
-        io.to(`family_${familyId}`).emit('data_updated', {
-            message: 'Comprovante processado pela IA!',
-            source: 'inbox_ai'
-        });
-
-        res.status(200).json({ message: 'Comprovante processado e transação cadastrada com sucesso!' });
     } catch (error) {
         console.error('Erro no processUpload:', error);
         res.status(500).json({ error: 'Erro interno no servidor' });

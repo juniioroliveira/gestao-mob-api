@@ -239,7 +239,7 @@ exports.createTransaction = async (req, res) => {
                 type, 
                 desc, 
                 dateStr, 
-                false, 
+                req.body.is_ai_processed || false, 
                 finalPaymentType,
                 installmentGroupId,
                 isInstallment ? i : null,
