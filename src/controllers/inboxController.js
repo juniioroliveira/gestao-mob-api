@@ -155,9 +155,10 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
                         ).catch(err => console.error('Erro update doc:', err));
                     } else {
                         // Falha de validação ou erro (ex: valor nulo)
+                        let validationError = data.error || data.message || 'Dados insuficientes extraídos pela IA.';
                         await runQuery(
-                            'UPDATE inbox_documents SET status = "FAILED", extracted_data = ? WHERE id = ?', 
-                            [JSON.stringify(aiResult), documentId]
+                            'UPDATE inbox_documents SET status = "FAILED", extracted_data = ?, error_message = ? WHERE id = ?', 
+                            [JSON.stringify(aiResult), validationError, documentId]
                         ).catch(err => console.error('Erro update doc:', err));
                     }
 
@@ -175,11 +176,20 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
 
     } catch (err) {
         console.error(`[Background AI] Erro ao processar documento #${documentId}:`, err);
-        // Tenta salvar o que conseguiu do aiResult, se houver
+        
         let extractedJson = null;
         try { if (typeof aiResult !== 'undefined' && aiResult) extractedJson = JSON.stringify(aiResult); } catch (e) {}
 
-        await runQuery('UPDATE inbox_documents SET status = "FAILED", extracted_data = ? WHERE id = ?', [extractedJson, documentId]).catch(() => {});
+        let errorMessage = err.message || 'Erro desconhecido';
+        if (errorMessage.includes('429')) errorMessage = 'Excesso de requisições à IA (Tente novamente mais tarde).';
+        else if (errorMessage.includes('503')) errorMessage = 'O servidor da IA está sobrecarregado.';
+        else errorMessage = `Falha na leitura: ${errorMessage.substring(0, 50)}...`;
+
+        await runQuery(
+            'UPDATE inbox_documents SET status = "FAILED", extracted_data = ?, error_message = ? WHERE id = ?', 
+            [extractedJson, errorMessage, documentId]
+        ).catch(() => {});
+        
         const { getIo } = require('../websockets/socket');
         const io = getIo();
         if (io) {

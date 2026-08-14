@@ -139,14 +139,14 @@ Lista de Contas/Carteiras Disponíveis:
 ${JSON.stringify(accountsList, null, 2)}
 `;
 
-    // Lógica de Retry para lidar com Erros 503 (High Demand)
-    let retries = 3;
-    let delay = 3000; // 3 segundos
+    // Lógica de Retry para lidar com Erros 503 e 429
+    let retries = 5; // Aumentado para 5 tentativas
+    let delay = 3000;
     
     while (retries > 0) {
         try {
             const response = await ai.models.generateContent({
-                model: 'gemini-flash-latest', // Restabelecido para o único modelo que tem suporte na v1beta
+                model: 'gemini-flash-latest',
                 contents: [
                     prompt,
                     { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
@@ -163,11 +163,26 @@ ${JSON.stringify(accountsList, null, 2)}
             retries--;
             if (retries === 0) {
                 console.error('❌ Falha definitiva após várias tentativas no Gemini.');
-                return null;
+                throw error; // Lançar erro para o inboxController salvar o error_message
             }
+            
+            // Tratamento inteligente para erro 429 (Quota Exceeded)
+            let waitTime = delay;
+            if (error.message && error.message.includes('429')) {
+                const match = error.message.match(/Please retry in (\d+(?:\.\d+)?)s/);
+                if (match && match[1]) {
+                    const requestedSeconds = parseFloat(match[1]);
+                    console.log(`[Background AI] Gemini pediu para aguardar ${requestedSeconds}s. Aguardando...`);
+                    waitTime = (requestedSeconds * 1000) + 1000; // Tempo pedido + 1s de margem
+                } else {
+                    waitTime = 10000; // Fallback de 10s se não encontrar o texto exato
+                }
+            } else {
+                delay += 2000; // Incremento normal para outros erros
+            }
+
             // Espera antes de tentar de novo
-            await new Promise(res => setTimeout(res, delay));
-            delay += 2000; // Aumenta o tempo de espera (backoff)
+            await new Promise(res => setTimeout(res, waitTime));
         }
     }
     return null;

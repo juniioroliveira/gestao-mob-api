@@ -32,5 +32,7 @@ const upload = multer({
 router.post('/upload', authenticateToken, upload.single('document'), documentController.uploadDocument);
 router.get('/inbox', authenticateToken, documentController.getInboxDocuments);
 router.delete('/:id', authenticateToken, documentController.deleteDocument);
+router.post('/inbox/:id/cancel', authenticateToken, documentController.cancelDocument);
+router.post('/inbox/:id/reprocess', authenticateToken, documentController.reprocessDocument);
 
 module.exports = router;
