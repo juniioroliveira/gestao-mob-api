@@ -47,7 +47,7 @@ exports.processUpload = async (req, res) => {
         // Se a IA detectou que precisa criar a conta
         if (aiResult.shouldCreateAccount && aiResult.newAccountName) {
             const insertAccount = await runQuery(
-                'INSERT INTO accounts (family_id, name, balance, type) VALUES (?, ?, 0, ?)', 
+                'INSERT INTO accounts (family_id, name, current_balance, type) VALUES (?, ?, 0, ?)', 
                 [familyId, aiResult.newAccountName, 'CHECKING']
             );
             accountId = insertAccount.lastID;
@@ -56,7 +56,7 @@ exports.processUpload = async (req, res) => {
         // Caso a IA falhe em associar categoria, usar fallback genérico para não quebrar a inserção
         let categoryId = aiResult.categoryId;
         if (!categoryId) {
-            const fallbackCat = await getQuery('SELECT id FROM categories WHERE family_id = ? AND type = ? LIMIT 1', [familyId, aiResult.type || 'EXPENSE']);
+            const fallbackCat = await getQuery('SELECT id FROM categories WHERE family_id = ? AND type = ? LIMIT 1', [familyId, (aiResult.type || 'EXPENSE').toUpperCase()]);
             if (fallbackCat.length > 0) {
                 categoryId = fallbackCat[0].id;
             }
@@ -68,10 +68,16 @@ exports.processUpload = async (req, res) => {
             accountId = await getOrCreateWalletAccountId(familyId);
         }
 
-        const type = aiResult.type || 'EXPENSE';
+        const type = (aiResult.type || 'EXPENSE').toUpperCase();
         const description = aiResult.description || 'Comprovante recebido';
-        const amount = aiResult.amount || 0.0;
-        const date = aiResult.date || new Date().toISOString().split('T')[0];
+        const rawAmount = aiResult.amount ? String(aiResult.amount).replace(',', '.') : '0.0';
+        const amount = parseFloat(rawAmount) || 0.0;
+        
+        let date = aiResult.date;
+        // Se a data vier fora do padrão YYYY-MM-DD, a gente faz um fallback básico
+        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            date = new Date().toISOString().split('T')[0];
+        }
 
         // Mapear a saída da IA para o body esperado pelo transactionController
         req.body = {

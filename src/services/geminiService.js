@@ -121,9 +121,9 @@ async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) 
 Sua tarefa é analisar o comprovante bancário (imagem ou PDF) e extrair os dados da transação.
 Retorne um objeto JSON estrito com os seguintes campos exatos:
 - "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
-- "amount": Valor da transação (Float, utilize ponto para decimais).
-- "date": Data da transação no formato "YYYY-MM-DD".
-- "type": "EXPENSE" (se for pagamento, compra, pix enviado) ou "INCOME" (se for recebimento).
+- "amount": Valor da transação (Número Float, utilize ponto para decimais, não use vírgulas).
+- "date": A data real da transação que está impressa no comprovante, estritamente no formato "YYYY-MM-DD". Atenção: procure pela data em que o pagamento/transferência ocorreu.
+- "type": Exatamente "EXPENSE" (se for pagamento, compra, pix enviado) ou "INCOME" (se for recebimento).
 - "categoryId": O ID numérico da categoria correspondente da lista fornecida. Combine exatamente o tipo da transação. Se houver dúvida e for despesa, escolha "Outros" ou similar.
 - "accountId": O ID numérico da conta/instituição correspondente da lista.
 - "shouldCreateAccount": Booleano (true) se a instituição/banco do comprovante não estiver na lista de contas fornecidas.
