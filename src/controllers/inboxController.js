@@ -91,6 +91,13 @@ exports.processUpload = async (req, res) => {
             'PIX'
         ]);
 
+        // Atualizar saldo da conta correspondente
+        if (type === 'EXPENSE') {
+            await runQuery(`UPDATE accounts SET current_balance = current_balance - ? WHERE id = ? AND family_id = ?`, [amount, accountId, familyId]);
+        } else if (type === 'INCOME') {
+            await runQuery(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ? AND family_id = ?`, [amount, accountId, familyId]);
+        }
+
         triggerUpdate(familyId);
 
         // Disparar evento WebSocket para o Frontend atualizar a tela em tempo real
