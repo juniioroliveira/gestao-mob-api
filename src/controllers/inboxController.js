@@ -152,6 +152,12 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
                         'UPDATE inbox_documents SET status = "PROCESSED", extracted_data = ?, transaction_id = ? WHERE id = ?', 
                         [JSON.stringify(aiResult), transactionCreatedId, documentId]
                     ).catch(err => console.error('Erro update doc:', err));
+
+                    const { getIo } = require('../websockets/socket');
+                    const io = getIo();
+                    if (io) {
+                        io.to(`family_${familyId}`).emit('data_updated', { source: 'documents', action: 'updated' });
+                    }
                 }
             })
         };
@@ -162,5 +168,10 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
     } catch (err) {
         console.error(`[Background AI] Erro ao processar documento #${documentId}:`, err);
         await runQuery('UPDATE inbox_documents SET status = "FAILED" WHERE id = ?', [documentId]).catch(() => {});
+        const { getIo } = require('../websockets/socket');
+        const io = getIo();
+        if (io) {
+            io.to(`family_${familyId}`).emit('data_updated', { source: 'documents', action: 'failed' });
+        }
     }
 }
