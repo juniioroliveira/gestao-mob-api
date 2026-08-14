@@ -31,6 +31,41 @@ exports.processUpload = async (req, res) => {
     const mimeType = req.file.mimetype;
 
     try {
+        const base64Data = fileBuffer.toString('base64');
+        const fileName = req.file.originalname || 'comprovante.jpg';
+
+        // 1. Salvar no banco como PENDING
+        const insertDocQuery = `
+            INSERT INTO inbox_documents (family_id, member_id, file_path, file_name, file_type, file_base64, status)
+            VALUES (?, ?, 'db_base64', ?, ?, ?, 'PENDING')
+        `;
+        const result = await runQuery(insertDocQuery, [familyId, memberId, fileName, mimeType, base64Data]);
+        const documentId = result.lastID;
+
+        // 2. Retornar SUCESSO imediato para o celular
+        res.status(200).json({ 
+            message: 'Comprovante recebido! Processando com IA em segundo plano...',
+            documentId
+        });
+
+        // 3. Chamar processamento em background (solto)
+        processDocumentAsync(documentId, familyId, memberId, fileBuffer, mimeType).catch(err => {
+            console.error('[Background AI] Erro fatal no processDocumentAsync:', err);
+        });
+
+    } catch (error) {
+        console.error('Erro no processUpload:', error);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
+};
+
+/**
+ * Função rodando em segundo plano (background job)
+ */
+async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, mimeType) {
+    try {
+        console.log(`[Background AI] Iniciando processamento do documento #${documentId}...`);
+        
         // Obter categorias e contas
         const categories = await getQuery('SELECT id, name, type FROM categories WHERE family_id = ?', [familyId]);
         const accounts = await getQuery('SELECT id, name FROM accounts WHERE family_id = ?', [familyId]);
@@ -39,12 +74,13 @@ exports.processUpload = async (req, res) => {
         const aiResult = await extractReceiptWithAI(fileBuffer, mimeType, categories, accounts);
 
         if (!aiResult) {
-            return res.status(500).json({ error: 'Falha ao processar o comprovante com Inteligência Artificial.' });
+            console.error(`[Background AI] Falha ao ler documento #${documentId}`);
+            await runQuery('UPDATE inbox_documents SET status = "FAILED" WHERE id = ?', [documentId]);
+            return;
         }
 
         let accountId = aiResult.accountId;
 
-        // Se a IA detectou que precisa criar a conta
         if (aiResult.shouldCreateAccount && aiResult.newAccountName) {
             const insertAccount = await runQuery(
                 'INSERT INTO accounts (family_id, name, current_balance, type) VALUES (?, ?, 0, ?)', 
@@ -53,7 +89,6 @@ exports.processUpload = async (req, res) => {
             accountId = insertAccount.lastID;
         }
 
-        // Caso a IA falhe em associar categoria, usar fallback genérico para não quebrar a inserção
         let categoryId = aiResult.categoryId;
         if (!categoryId) {
             const fallbackCat = await getQuery('SELECT id FROM categories WHERE family_id = ? AND type = ? LIMIT 1', [familyId, (aiResult.type || 'EXPENSE').toUpperCase()]);
@@ -62,7 +97,6 @@ exports.processUpload = async (req, res) => {
             }
         }
 
-        // Se mesmo assim accountId não existir, forçar a conta carteira
         if (!accountId) {
             const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
             accountId = await getOrCreateWalletAccountId(familyId);
@@ -74,32 +108,49 @@ exports.processUpload = async (req, res) => {
         const amount = parseFloat(rawAmount) || 0.0;
         
         let date = aiResult.date;
-        // Se a data vier fora do padrão YYYY-MM-DD, a gente faz um fallback básico
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             date = new Date().toISOString().split('T')[0];
         }
 
-        // Mapear a saída da IA para o body esperado pelo transactionController
-        req.body = {
-            accountId,
-            destinationAccountId: null,
-            memberId: [memberId],
-            categoryId,
-            amount,
-            type,
-            description,
-            date,
-            paymentType: 'PIX',
-            installments: 1,
-            is_ai_processed: true
+        // Fake Req e Res para o transactionController
+        const mockReq = {
+            user: { id: memberId, family_id: familyId },
+            body: {
+                accountId,
+                destinationAccountId: null,
+                memberId: [memberId],
+                categoryId,
+                amount,
+                type,
+                description,
+                date,
+                paymentType: 'PIX',
+                installments: 1,
+                is_ai_processed: true
+            }
         };
 
-        // Delegar a criação para o controller padrão (garante reuso de atualização de saldo, WebSocket e background AI)
-        const transactionController = require('./transactionController');
-        return await transactionController.createTransaction(req, res);
+        let transactionCreatedId = null;
+        const mockRes = {
+            status: (code) => ({
+                json: async (data) => {
+                    console.log(`[Background AI] Transação criada via IA:`, data);
+                    transactionCreatedId = data.id || null;
+                    
+                    // Marcar documento como processado com sucesso
+                    await runQuery(
+                        'UPDATE inbox_documents SET status = "PROCESSED", extracted_data = ?, transaction_id = ? WHERE id = ?', 
+                        [JSON.stringify(aiResult), transactionCreatedId, documentId]
+                    ).catch(err => console.error('Erro update doc:', err));
+                }
+            })
+        };
 
-    } catch (error) {
-        console.error('Erro no processUpload:', error);
-        res.status(500).json({ error: 'Erro interno no servidor' });
+        const transactionController = require('./transactionController');
+        await transactionController.createTransaction(mockReq, mockRes);
+
+    } catch (err) {
+        console.error(`[Background AI] Erro ao processar documento #${documentId}:`, err);
+        await runQuery('UPDATE inbox_documents SET status = "FAILED" WHERE id = ?', [documentId]).catch(() => {});
     }
-};
+}
