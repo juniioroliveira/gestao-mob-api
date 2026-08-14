@@ -33,7 +33,7 @@ exports.processUpload = async (req, res) => {
     try {
         // Obter categorias e contas
         const categories = await getQuery('SELECT id, name, type FROM categories WHERE family_id = ?', [familyId]);
-        const accounts = await getQuery('SELECT id, name FROM accounts WHERE family_id = ? AND archived = 0', [familyId]);
+        const accounts = await getQuery('SELECT id, name FROM accounts WHERE family_id = ?', [familyId]);
 
         // Enviar para a IA
         const aiResult = await extractReceiptWithAI(fileBuffer, mimeType, categories, accounts);
