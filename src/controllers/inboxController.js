@@ -48,6 +48,16 @@ exports.processUpload = async (req, res) => {
             documentId
         });
 
+        // Emitir evento para o Frontend de que um novo documento chegou
+        const { getIo } = require('../utils/socket');
+        const io = getIo();
+        if (io) {
+            io.to(`family_${familyId}`).emit('data_updated', {
+                source: 'documents',
+                action: 'created'
+            });
+        }
+
         // 3. Chamar processamento em background (solto)
         processDocumentAsync(documentId, familyId, memberId, fileBuffer, mimeType).catch(err => {
             console.error('[Background AI] Erro fatal no processDocumentAsync:', err);

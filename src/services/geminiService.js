@@ -113,11 +113,10 @@ ${JSON.stringify(transactions.map(t => ({
 async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) {
     if (!ai) return null;
     
-    try {
-        const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
-        const accountsList = accounts.map(a => ({ id: a.id, name: a.name }));
-        
-        const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
+    const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
+    const accountsList = accounts.map(a => ({ id: a.id, name: a.name }));
+    
+    const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
 Sua tarefa é analisar o comprovante bancário (imagem ou PDF) e extrair os dados da transação.
 Retorne um objeto JSON estrito com os seguintes campos exatos:
 - "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
@@ -131,7 +130,7 @@ Retorne um objeto JSON estrito com os seguintes campos exatos:
 
 Responda APENAS com a estrutura JSON bruta, sem formatações Markdown (como \`\`\`json) ou textos explicativos.`;
 
-        const prompt = `
+    const prompt = `
 Lista de Categorias Disponíveis:
 ${JSON.stringify(categoriesList, null, 2)}
 
@@ -139,23 +138,38 @@ Lista de Contas/Carteiras Disponíveis:
 ${JSON.stringify(accountsList, null, 2)}
 `;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-flash-latest',
-            contents: [
-                prompt,
-                { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
-            ],
-            config: {
-                systemInstruction: systemInstruction,
-                responseMimeType: 'application/json'
+    // Lógica de Retry para lidar com Erros 503 (High Demand)
+    let retries = 3;
+    let delay = 3000; // 3 segundos
+    
+    while (retries > 0) {
+        try {
+            const response = await ai.models.generateContent({
+                model: 'gemini-1.5-flash-8b', // Tentando usar o modelo oficial ultraleve
+                contents: [
+                    prompt,
+                    { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
+                ],
+                config: {
+                    systemInstruction: systemInstruction,
+                    responseMimeType: 'application/json'
+                }
+            });
+            
+            return JSON.parse(response.text.trim());
+        } catch (error) {
+            console.error(`❌ Erro no Gemini (Tentativas Restantes: ${retries - 1}):`, error.message);
+            retries--;
+            if (retries === 0) {
+                console.error('❌ Falha definitiva após várias tentativas no Gemini.');
+                return null;
             }
-        });
-        
-        return JSON.parse(response.text.trim());
-    } catch (error) {
-        console.error('❌ Erro durante a leitura do comprovante pelo Gemini:', error);
-        return null;
+            // Espera antes de tentar de novo
+            await new Promise(res => setTimeout(res, delay));
+            delay += 2000; // Aumenta o tempo de espera (backoff)
+        }
     }
+    return null;
 }
 
 module.exports = {
