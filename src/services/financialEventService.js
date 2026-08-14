@@ -16,7 +16,9 @@ function triggerUpdate(familyId) {
         clearTimeout(debounceTimers.get(familyId));
     }
 
-    // Criamos um novo timer para daqui 10 segundos
+    // Criamos um novo timer para daqui 5 minutos (300000 ms)
+    // Se novas requisições chegarem antes de 5 min, o timer será resetado.
+    console.log(`⏱️ [Background AI] Atualização agendada para família ${familyId} em 5 minutos.`);
     const timer = setTimeout(async () => {
         try {
             console.log(`⏳ [Background AI] Iniciando recalculo para a família ${familyId}...`);
@@ -28,10 +30,10 @@ function triggerUpdate(familyId) {
             // Limpa do map após finalizar
             debounceTimers.delete(familyId);
         }
-    }, 10000); // 10 segundos
+    }, 300000);
 
     debounceTimers.set(familyId, timer);
-    console.log(`⏱️ [Background AI] Atualização agendada para família ${familyId} em 10s.`);
+    console.log(`⏱️ [Background AI] Atualização agendada para família ${familyId} em 5 minutos.`);
 }
 
 module.exports = {
