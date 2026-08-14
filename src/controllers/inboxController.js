@@ -197,3 +197,5 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
         }
     }
 }
+
+exports.processDocumentAsync = processDocumentAsync;
