@@ -495,17 +495,34 @@ Lista de Transações Recentes para Contexto:
 ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val: t.amount, data: t.transaction_date })), null, 2)}
 `;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-flash-latest',
-            contents: prompt,
-            config: {
-                systemInstruction: systemInstruction,
-                responseMimeType: 'application/json'
-            }
-        });
+        let retries = 3;
+        let delay = 3000;
+        let aiJson = null;
 
-        const aiResponseText = response.text.trim();
-        const aiJson = JSON.parse(aiResponseText);
+        while (retries > 0) {
+            try {
+                const response = await ai.models.generateContent({
+                    model: 'gemini-flash-latest',
+                    contents: prompt,
+                    config: {
+                        systemInstruction: systemInstruction,
+                        responseMimeType: 'application/json'
+                    }
+                });
+
+                const aiResponseText = response.text.trim();
+                aiJson = JSON.parse(aiResponseText);
+                break; // Sucesso, sai do loop
+            } catch (error) {
+                console.error(`Erro na IA do Termômetro (Tentativas: ${retries - 1}):`, error.message);
+                retries--;
+                if (retries === 0) {
+                    throw new Error("Falha ao gerar IA do termômetro após várias tentativas: " + error.message);
+                }
+                await new Promise(res => setTimeout(res, delay));
+                delay += 2000;
+            }
+        }
 
         const finalResponsePayload = {
             useFallback: false,
