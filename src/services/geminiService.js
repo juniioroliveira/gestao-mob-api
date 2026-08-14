@@ -116,12 +116,13 @@ async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) 
     const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
     const accountsList = accounts.map(a => ({ id: a.id, name: a.name }));
     
+    const currentYear = new Date().getFullYear();
     const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
 Sua tarefa é analisar a imagem enviada (que pode ser um comprovante bancário oficial, um PDF, ou um Print/Screenshot da tela do aplicativo do banco mostrando o extrato/transação) e extrair os dados da transação.
 Retorne um objeto JSON estrito com os seguintes campos exatos:
 - "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
 - "amount": Valor da transação (Número Float, utilize ponto para decimais, não use vírgulas).
-- "date": A data real da transação que está impressa no comprovante, estritamente no formato "YYYY-MM-DD". Atenção: procure pela data em que o pagamento/transferência ocorreu.
+- "date": A data real da transação que está impressa no comprovante, estritamente no formato "YYYY-MM-DD". ATENÇÃO: procure pela data em que o pagamento/transferência ocorreu. Se o ano não estiver explícito na imagem, ASSUMA OBRIGATORIAMENTE o ano atual de ${currentYear}. Não invente anos passados.
 - "type": Exatamente "EXPENSE" (se for pagamento, compra, pix enviado) ou "INCOME" (se for recebimento).
 - "categoryId": O ID numérico da categoria correspondente da lista fornecida. Combine exatamente o tipo da transação. Se houver dúvida e for despesa, escolha "Outros" ou similar.
 - "accountId": O ID numérico da conta/instituição correspondente da lista.
