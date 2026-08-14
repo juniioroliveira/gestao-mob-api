@@ -162,3 +162,22 @@ exports.register = (req, res) => {
         });
     });
 };
+
+exports.generateShortcutToken = (req, res) => {
+    // req.user já vem populado pelo authMiddleware
+    const payload = {
+        id: req.user.id,
+        family_id: req.user.family_id,
+        role: req.user.role,
+        is_admin: req.user.is_admin,
+        is_shortcut: true
+    };
+
+    // Gera um token que expira em 10 anos
+    const shortcutToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '3650d' });
+
+    res.status(200).json({
+        token: shortcutToken,
+        message: 'Token de atalho gerado com sucesso'
+    });
+};
