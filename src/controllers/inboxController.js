@@ -49,7 +49,7 @@ exports.processUpload = async (req, res) => {
         });
 
         // Emitir evento para o Frontend de que um novo documento chegou
-        const { getIo } = require('../utils/socket');
+        const { getIo } = require('../websockets/socket');
         const io = getIo();
         if (io) {
             io.to(`family_${familyId}`).emit('data_updated', {
