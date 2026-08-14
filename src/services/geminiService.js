@@ -101,6 +101,64 @@ ${JSON.stringify(transactions.map(t => ({
     }
 }
 
+/**
+ * Analisa a imagem/PDF de um comprovante e extrai os dados financeiros usando Gemini 2.5 Flash.
+ * 
+ * @param {Buffer} fileBuffer Buffer do arquivo enviado (imagem ou PDF)
+ * @param {string} mimeType MimeType do arquivo
+ * @param {Array} categories Lista de categorias da família
+ * @param {Array} accounts Lista de contas bancárias da família
+ * @returns {Promise<Object>} Dados estruturados da transação ou null
+ */
+async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) {
+    if (!ai) return null;
+    
+    try {
+        const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
+        const accountsList = accounts.map(a => ({ id: a.id, name: a.name }));
+        
+        const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
+Sua tarefa é analisar o comprovante bancário (imagem ou PDF) e extrair os dados da transação.
+Retorne um objeto JSON estrito com os seguintes campos exatos:
+- "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
+- "amount": Valor da transação (Float, utilize ponto para decimais).
+- "date": Data da transação no formato "YYYY-MM-DD".
+- "type": "EXPENSE" (se for pagamento, compra, pix enviado) ou "INCOME" (se for recebimento).
+- "categoryId": O ID numérico da categoria correspondente da lista fornecida. Combine exatamente o tipo da transação. Se houver dúvida e for despesa, escolha "Outros" ou similar.
+- "accountId": O ID numérico da conta/instituição correspondente da lista.
+- "shouldCreateAccount": Booleano (true) se a instituição/banco do comprovante não estiver na lista de contas fornecidas.
+- "newAccountName": O nome da instituição (ex: "Nubank") caso shouldCreateAccount seja true.
+
+Responda APENAS com a estrutura JSON bruta, sem formatações Markdown (como \`\`\`json) ou textos explicativos.`;
+
+        const prompt = `
+Lista de Categorias Disponíveis:
+${JSON.stringify(categoriesList, null, 2)}
+
+Lista de Contas/Carteiras Disponíveis:
+${JSON.stringify(accountsList, null, 2)}
+`;
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [
+                prompt,
+                { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
+            ],
+            config: {
+                systemInstruction: systemInstruction,
+                responseMimeType: 'application/json'
+            }
+        });
+        
+        return JSON.parse(response.text.trim());
+    } catch (error) {
+        console.error('❌ Erro durante a leitura do comprovante pelo Gemini:', error);
+        return null;
+    }
+}
+
 module.exports = {
-    enrichTransactionsWithAI
+    enrichTransactionsWithAI,
+    extractReceiptWithAI
 };

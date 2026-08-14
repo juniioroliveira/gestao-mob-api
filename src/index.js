@@ -31,10 +31,10 @@ const transactionRoutes = require('./routes/transactionRoutes');
 const memberRoutes = require('./routes/memberRoutes');
 const accountRoutes = require('./routes/accountRoutes');
 const bankRoutes = require('./routes/bankRoutes');
+const documentRoutes = require('./routes/documentRoutes');
+const inboxRoutes = require('./routes/inboxRoutes');
 
 // Registrando as Rotas
-const documentRoutes = require('./routes/documentRoutes');
-
 app.use('/api/test', testRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/home', homeRoutes);
@@ -47,6 +47,7 @@ app.use('/api/members', memberRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/banks', bankRoutes);
 app.use('/api/documents', documentRoutes);
+app.use('/api/inbox', inboxRoutes);
 
 // Configurando o Socket.io passando o servidor HTTP nativo
 initWebSockets(server);
