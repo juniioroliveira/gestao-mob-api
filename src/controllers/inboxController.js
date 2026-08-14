@@ -144,14 +144,22 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
         const mockRes = {
             status: (code) => ({
                 json: async (data) => {
-                    console.log(`[Background AI] Transação criada via IA:`, data);
-                    transactionCreatedId = data.id || null;
+                    console.log(`[Background AI] Resposta do transactionController (Code: ${code}):`, data);
+                    const transactionCreatedId = data.id || null;
                     
-                    // Marcar documento como processado com sucesso
-                    await runQuery(
-                        'UPDATE inbox_documents SET status = "PROCESSED", extracted_data = ?, transaction_id = ? WHERE id = ?', 
-                        [JSON.stringify(aiResult), transactionCreatedId, documentId]
-                    ).catch(err => console.error('Erro update doc:', err));
+                    if (code >= 200 && code < 300) {
+                        // Sucesso
+                        await runQuery(
+                            'UPDATE inbox_documents SET status = "PROCESSED", extracted_data = ?, transaction_id = ? WHERE id = ?', 
+                            [JSON.stringify(aiResult), transactionCreatedId, documentId]
+                        ).catch(err => console.error('Erro update doc:', err));
+                    } else {
+                        // Falha de validação ou erro (ex: valor nulo)
+                        await runQuery(
+                            'UPDATE inbox_documents SET status = "FAILED", extracted_data = ? WHERE id = ?', 
+                            [JSON.stringify(aiResult), documentId]
+                        ).catch(err => console.error('Erro update doc:', err));
+                    }
 
                     const { getIo } = require('../websockets/socket');
                     const io = getIo();
@@ -167,7 +175,11 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
 
     } catch (err) {
         console.error(`[Background AI] Erro ao processar documento #${documentId}:`, err);
-        await runQuery('UPDATE inbox_documents SET status = "FAILED" WHERE id = ?', [documentId]).catch(() => {});
+        // Tenta salvar o que conseguiu do aiResult, se houver
+        let extractedJson = null;
+        try { if (typeof aiResult !== 'undefined' && aiResult) extractedJson = JSON.stringify(aiResult); } catch (e) {}
+
+        await runQuery('UPDATE inbox_documents SET status = "FAILED", extracted_data = ? WHERE id = ?', [extractedJson, documentId]).catch(() => {});
         const { getIo } = require('../websockets/socket');
         const io = getIo();
         if (io) {

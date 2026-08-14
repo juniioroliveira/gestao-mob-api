@@ -46,7 +46,7 @@ exports.getInboxDocuments = (req, res) => {
     const familyId = req.user.family_id;
 
     const query = `
-        SELECT id, file_path, file_name, file_type, status, created_at
+        SELECT id, file_path, file_name, file_type, status, created_at, extracted_data
         FROM inbox_documents
         WHERE family_id = ?
         ORDER BY created_at DESC
