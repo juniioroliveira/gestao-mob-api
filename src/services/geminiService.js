@@ -145,7 +145,7 @@ ${JSON.stringify(accountsList, null, 2)}
     while (retries > 0) {
         try {
             const response = await ai.models.generateContent({
-                model: 'gemini-1.5-flash-8b', // Tentando usar o modelo oficial ultraleve
+                model: 'gemini-flash-latest', // Restabelecido para o único modelo que tem suporte na v1beta
                 contents: [
                     prompt,
                     { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
