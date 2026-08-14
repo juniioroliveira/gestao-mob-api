@@ -140,7 +140,7 @@ ${JSON.stringify(accountsList, null, 2)}
 `;
 
         const response = await ai.models.generateContent({
-            model: 'gemini-1.5-flash',
+            model: 'gemini-flash-latest',
             contents: [
                 prompt,
                 { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
