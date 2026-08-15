@@ -2,6 +2,19 @@ const db = require('../config/database');
 const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
 const { triggerUpdate } = require('../services/financialEventService');
 
+// Promisified db.run — dá acesso a `lastID`/`changes` (como o callback do sqlite3)
+// sem precisar de callback aninhado. Usado pelas rotas de criar/editar conta e parcelas.
+const runPromise = (sql, params) => new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+        if (err) reject(err);
+        else resolve(this); // this.lastID / this.changes
+    });
+});
+
+const allPromise = (sql, params) => new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows));
+});
+
 exports.getFixedExpenses = async (req, res) => {
     const familyId = req.user.family_id;
     const filterType = req.query.type;
@@ -82,6 +95,23 @@ exports.getFixedExpenses = async (req, res) => {
         const membersRows = await queryPromise(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId]);
         const members = membersRows || [];
 
+        // Parcelas explícitas (data + valor próprios de cada uma) das contas Variáveis
+        // cadastradas com o novo modelo de "lista de parcelas". Contas Variáveis antigas
+        // não têm linha nenhuma aqui e continuam usando a geração mensal por due_day/start_date.
+        const allInstallments = await queryPromise(
+            `SELECT ri.id, ri.recurring_bill_id, ri.installment_number, ri.amount, ri.due_date, ri.status, ri.transaction_id
+             FROM recurring_bill_installments ri
+             INNER JOIN recurring_bills rb ON rb.id = ri.recurring_bill_id
+             WHERE rb.family_id = ?
+             ORDER BY ri.due_date ASC`,
+            [familyId]
+        );
+        const installmentsByBillId = {};
+        (allInstallments || []).forEach(inst => {
+            if (!installmentsByBillId[inst.recurring_bill_id]) installmentsByBillId[inst.recurring_bill_id] = [];
+            installmentsByBillId[inst.recurring_bill_id].push(inst);
+        });
+
         // Data real de hoje — usada abaixo pra decidir o que é "atrasado de verdade",
         // independente do mês que o usuário está navegando na tela.
         const realToday = new Date();
@@ -142,6 +172,76 @@ exports.getFixedExpenses = async (req, res) => {
                 startDate: row.start_date,
                 endDate: row.end_date,
             });
+
+            const billInstallments = installmentsByBillId[row.id];
+            const hasExplicitInstallments = row.type === 'VARIABLE' && billInstallments && billInstallments.length > 0;
+
+            if (hasExplicitInstallments) {
+                // Modelo novo: cada parcela já tem sua própria data e valor — não tem
+                // "due_day mensal" pra assumir, então nada de loop mês a mês aqui. Isso é
+                // o que permite cadências irregulares (ex: a cada 15 dias).
+                const totalCount = billInstallments.length;
+                for (const inst of billInstallments) {
+                    const instDate = new Date(inst.due_date);
+                    instDate.setHours(0, 0, 0, 0);
+                    const instYear = instDate.getFullYear();
+                    const instMonth = instDate.getMonth() + 1;
+
+                    // Só mostra parcelas até (e incluindo) o mês que o usuário está navegando —
+                    // parcela de daqui a vários meses só aparece quando ele chegar lá.
+                    const isAtOrBeforeTarget = (instYear < year) || (instYear === year && instMonth <= month);
+                    if (!isAtOrBeforeTarget) continue;
+
+                    const exp = {
+                        id: `${row.id}_inst${inst.id}`,
+                        installmentId: inst.id,
+                        title: row.name,
+                        amount: inst.amount,
+                        rawAmount: inst.amount,
+                        dueDate: `${String(instDate.getDate()).padStart(2, '0')}/${String(instMonth).padStart(2, '0')}`,
+                        dueDay: instDate.getDate(),
+                        isAutoPay: Boolean(row.is_auto_pay),
+                        isActive: Boolean(row.is_active),
+                        categoryId: row.category_id,
+                        categoryName: row.category_name,
+                        categoryColor: row.category_color,
+                        memberId: row.member_id,
+                        accountId: row.account_id,
+                        paymentType: row.payment_type,
+                        ownerName: ownerName,
+                        ownerAvatars: ownerAvatars,
+                        type: 'VARIABLE',
+                        totalInstallments: totalCount,
+                        currentInstallment: inst.installment_number,
+                        installmentLabel: `Parcela ${inst.installment_number}/${totalCount}`,
+                    };
+
+                    const isPaid = inst.status === 'PAID' || inst.transaction_id != null;
+                    if (isPaid) {
+                        exp.status = 'Pago';
+                        exp.statusColor = '#4CAF50';
+                        exp.isOverdue = false;
+                    } else if (instDate < realToday) {
+                        exp.status = 'Atrasado';
+                        exp.statusColor = '#F44336';
+                        exp.isOverdue = true;
+                    } else {
+                        const diffDays = Math.ceil((instDate.getTime() - realToday.getTime()) / (1000 * 60 * 60 * 24));
+                        if (diffDays <= 5) {
+                            exp.status = 'Vence em breve';
+                            exp.statusColor = '#FF9800';
+                        } else {
+                            exp.status = 'Pendente';
+                            exp.statusColor = '#2196F3';
+                        }
+                        exp.isOverdue = false;
+                    }
+
+                    expenses.push(exp);
+                }
+
+                continue; // já geramos tudo pra essa conta, pula pro próximo `row`
+            }
 
             // 1. GENERATE HISTORICAL UNPAID BILLS
             // Determine the starting point: start_date if available, else created_at
@@ -417,6 +517,58 @@ exports.markAsPaid = (req, res) => {
     });
 };
 
+// Mark a specific installment (modelo novo de parcelas) as paid manually, sem lançamento.
+exports.markInstallmentAsPaid = async (req, res) => {
+    const familyId = req.user.family_id;
+    const installmentId = req.params.installmentId;
+
+    try {
+        const row = await new Promise((resolve, reject) => {
+            db.get(
+                `SELECT ri.id FROM recurring_bill_installments ri
+                 INNER JOIN recurring_bills rb ON rb.id = ri.recurring_bill_id
+                 WHERE ri.id = ? AND rb.family_id = ?`,
+                [installmentId, familyId],
+                (err, r) => err ? reject(err) : resolve(r)
+            );
+        });
+        if (!row) return res.status(404).json({ error: 'Parcela não encontrada.' });
+
+        await runPromise(`UPDATE recurring_bill_installments SET status = 'PAID' WHERE id = ?`, [installmentId]);
+        triggerUpdate(familyId);
+        res.json({ message: 'Marcado como pago com sucesso.' });
+    } catch (err) {
+        console.error('Erro ao marcar parcela como paga:', err);
+        res.status(500).json({ error: 'Erro ao marcar como pago.' });
+    }
+};
+
+// Desfaz o "marcar como pago" manual de uma parcela específica.
+exports.unmarkInstallmentAsPaid = async (req, res) => {
+    const familyId = req.user.family_id;
+    const installmentId = req.params.installmentId;
+
+    try {
+        const row = await new Promise((resolve, reject) => {
+            db.get(
+                `SELECT ri.id FROM recurring_bill_installments ri
+                 INNER JOIN recurring_bills rb ON rb.id = ri.recurring_bill_id
+                 WHERE ri.id = ? AND rb.family_id = ?`,
+                [installmentId, familyId],
+                (err, r) => err ? reject(err) : resolve(r)
+            );
+        });
+        if (!row) return res.status(404).json({ error: 'Parcela não encontrada.' });
+
+        await runPromise(`UPDATE recurring_bill_installments SET status = 'PENDING', transaction_id = NULL WHERE id = ?`, [installmentId]);
+        triggerUpdate(familyId);
+        res.json({ message: 'Pagamento removido com sucesso.' });
+    } catch (err) {
+        console.error('Erro ao desmarcar parcela:', err);
+        res.status(500).json({ error: 'Erro ao desmarcar pagamento.' });
+    }
+};
+
 // Unmark a manual payment
 exports.unmarkAsPaid = (req, res) => {
     const familyId = req.user.family_id;
@@ -433,9 +585,24 @@ exports.unmarkAsPaid = (req, res) => {
     );
 };
 
+// Valida e normaliza a lista de parcelas vinda do app: [{ amount, dueDate }, ...].
+// Retorna null se a lista não vier ou vier vazia (conta variável no modelo antigo).
+function normalizeInstallments(installments) {
+    if (!Array.isArray(installments) || installments.length === 0) return null;
+    const normalized = installments
+        .map((inst) => ({
+            amount: parseFloat(inst.amount),
+            dueDate: inst.dueDate,
+        }))
+        .filter((inst) => !isNaN(inst.amount) && /^\d{4}-\d{2}-\d{2}$/.test(inst.dueDate || ''));
+    if (normalized.length === 0) return null;
+    normalized.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    return normalized;
+}
+
 exports.createFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
-    let { name, amount, dueDay, isAutoPay, categoryId, memberId, accountId, paymentType, type, totalInstallments, startDate } = req.body;
+    let { name, amount, dueDay, isAutoPay, categoryId, memberId, accountId, paymentType, type, totalInstallments, startDate, installments } = req.body;
 
     if (paymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -446,10 +613,18 @@ exports.createFixedExpense = async (req, res) => {
     }
 
     const expenseType = type || 'FIXED';
+    const normalizedInstallments = expenseType === 'VARIABLE' ? normalizeInstallments(installments) : null;
+
     let endDate = null;
     let currentInstallment = 1;
 
-    if (totalInstallments) {
+    if (normalizedInstallments) {
+        // Modelo novo: start_date/end_date/total_installments viram DERIVADOS da lista
+        // de parcelas — cada parcela já carrega sua própria data e valor reais.
+        startDate = normalizedInstallments[0].dueDate;
+        endDate = normalizedInstallments[normalizedInstallments.length - 1].dueDate;
+        totalInstallments = normalizedInstallments.length;
+    } else if (totalInstallments) {
         const start = startDate ? new Date(startDate) : new Date();
         const end = new Date(start);
         end.setMonth(end.getMonth() + parseInt(totalInstallments));
@@ -477,20 +652,32 @@ exports.createFixedExpense = async (req, res) => {
         endDate
     ];
 
-    db.run(query, params, function(err) {
-        if (err) {
-            console.error('Erro ao criar conta fixa:', err);
-            return res.status(500).json({ error: 'Erro ao criar conta fixa' });
+    try {
+        const result = await runPromise(query, params);
+        const billId = result.lastID;
+
+        if (normalizedInstallments) {
+            for (let i = 0; i < normalizedInstallments.length; i++) {
+                const inst = normalizedInstallments[i];
+                await runPromise(
+                    `INSERT INTO recurring_bill_installments (recurring_bill_id, installment_number, amount, due_date) VALUES (?, ?, ?, ?)`,
+                    [billId, i + 1, inst.amount, inst.dueDate]
+                );
+            }
         }
+
         triggerUpdate(familyId);
-        res.status(201).json({ message: 'Conta fixa criada com sucesso', id: this.lastID });
-    });
+        res.status(201).json({ message: 'Conta fixa criada com sucesso', id: billId });
+    } catch (err) {
+        console.error('Erro ao criar conta fixa:', err);
+        res.status(500).json({ error: 'Erro ao criar conta fixa' });
+    }
 };
 
 exports.updateFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
     const expenseId = req.params.id;
-    let { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId, accountId, paymentType, type, totalInstallments, currentInstallment, startDate, endDate } = req.body;
+    let { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId, accountId, paymentType, type, totalInstallments, currentInstallment, startDate, endDate, installments } = req.body;
 
     if (paymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -500,8 +687,19 @@ exports.updateFixedExpense = async (req, res) => {
         return res.status(400).json({ error: 'Nome, dia de vencimento e categoria são obrigatórios' });
     }
 
+    const expenseType = type || 'FIXED';
+    // `installments` só vem preenchido quando o app está de fato editando a lista de
+    // parcelas (tela de Conta Variável nova). Se vier `undefined`, não mexe em nada
+    // que já esteja salvo em recurring_bill_installments.
+    const normalizedInstallments = expenseType === 'VARIABLE' ? normalizeInstallments(installments) : null;
+    if (expenseType === 'VARIABLE' && normalizedInstallments) {
+        startDate = normalizedInstallments[0].dueDate;
+        endDate = normalizedInstallments[normalizedInstallments.length - 1].dueDate;
+        totalInstallments = normalizedInstallments.length;
+    }
+
     const query = `
-        UPDATE recurring_bills 
+        UPDATE recurring_bills
         SET name = ?, amount = ?, due_day = ?, is_auto_pay = ?, is_active = ?, category_id = ?, member_id = ?, account_id = ?, payment_type = ?,
             type = ?, total_installments = ?, current_installment = ?, start_date = ?, end_date = ?
         WHERE id = ? AND family_id = ?
@@ -516,7 +714,7 @@ exports.updateFixedExpense = async (req, res) => {
         memberId || null,
         accountId || null,
         paymentType || null,
-        type || 'FIXED',
+        expenseType,
         totalInstallments || null,
         currentInstallment || 1,
         startDate || null,
@@ -525,17 +723,31 @@ exports.updateFixedExpense = async (req, res) => {
         familyId
     ];
 
-    db.run(query, params, function(err) {
-        if (err) {
-            console.error('Erro ao atualizar conta fixa:', err);
-            return res.status(500).json({ error: 'Erro ao atualizar conta fixa' });
-        }
-        if (this.changes === 0) {
+    try {
+        const result = await runPromise(query, params);
+        if (result.changes === 0) {
             return res.status(404).json({ error: 'Conta fixa não encontrada' });
         }
+
+        if (normalizedInstallments) {
+            // Reconciliação simples: substitui a lista inteira em vez de tentar casar
+            // parcela por parcela (evita ambiguidade quando datas/valores mudam junto).
+            await runPromise(`DELETE FROM recurring_bill_installments WHERE recurring_bill_id = ?`, [expenseId]);
+            for (let i = 0; i < normalizedInstallments.length; i++) {
+                const inst = normalizedInstallments[i];
+                await runPromise(
+                    `INSERT INTO recurring_bill_installments (recurring_bill_id, installment_number, amount, due_date) VALUES (?, ?, ?, ?)`,
+                    [expenseId, i + 1, inst.amount, inst.dueDate]
+                );
+            }
+        }
+
         triggerUpdate(familyId);
         res.json({ message: 'Conta fixa atualizada com sucesso' });
-    });
+    } catch (err) {
+        console.error('Erro ao atualizar conta fixa:', err);
+        res.status(500).json({ error: 'Erro ao atualizar conta fixa' });
+    }
 };
 
 exports.deleteFixedExpense = (req, res) => {
@@ -555,6 +767,30 @@ exports.deleteFixedExpense = (req, res) => {
         triggerUpdate(familyId);
         res.json({ message: 'Conta fixa excluída com sucesso' });
     });
+};
+
+// Lista as parcelas explícitas (modelo novo) de uma conta Variável — usado pelo app
+// pra pré-preencher a lista inteira ao abrir "Editar", já que cada card na tela de
+// Gerenciar representa só UMA parcela.
+exports.getInstallmentsForBill = async (req, res) => {
+    const familyId = req.user.family_id;
+    const billId = req.params.id;
+
+    try {
+        const bill = await new Promise((resolve, reject) => {
+            db.get(`SELECT id FROM recurring_bills WHERE id = ? AND family_id = ?`, [billId, familyId], (err, r) => err ? reject(err) : resolve(r));
+        });
+        if (!bill) return res.status(404).json({ error: 'Conta não encontrada.' });
+
+        const installments = await allPromise(
+            `SELECT id, installment_number, amount, due_date, status FROM recurring_bill_installments WHERE recurring_bill_id = ? ORDER BY due_date ASC`,
+            [billId]
+        );
+        res.json({ installments: installments || [] });
+    } catch (err) {
+        console.error('Erro ao buscar parcelas da conta:', err);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
 };
 
 exports.getUnlinkedTransactions = (req, res) => {
@@ -583,7 +819,7 @@ exports.getUnlinkedTransactions = (req, res) => {
 
 exports.linkTransaction = (req, res) => {
     const familyId = req.user.family_id;
-    const { transactionId, recurringBillId } = req.body;
+    const { transactionId, recurringBillId, installmentId } = req.body;
 
     if (!transactionId || !recurringBillId) {
         return res.status(400).json({ error: 'transactionId e recurringBillId são obrigatórios' });
@@ -615,6 +851,30 @@ exports.linkTransaction = (req, res) => {
             if (errUpdate) {
                 console.error('Erro ao atualizar transação com o ID da conta fixa:', errUpdate);
                 return res.status(500).json({ error: 'Erro ao vincular pagamento' });
+            }
+
+            // Modelo novo (parcela explícita): marca a parcela específica como paga e
+            // vinculada a essa transação. Não mexe em current_installment/is_active —
+            // isso é coisa do modelo antigo (mensal, sem lista de parcelas).
+            if (installmentId) {
+                db.run(
+                    `UPDATE recurring_bill_installments SET status = 'PAID', transaction_id = ? WHERE id = ? AND recurring_bill_id = ?`,
+                    [transactionId, installmentId, recurringBillId],
+                    function(errInst) {
+                        if (errInst) console.error('Erro ao marcar parcela como paga:', errInst);
+                        const { getIo } = require('../websockets/socket');
+                        const io = getIo();
+                        if (io) {
+                            io.to(`family_${familyId}`).emit('data_updated', {
+                                source: 'fixed_expenses',
+                                action: 'linked'
+                            });
+                        }
+                        triggerUpdate(familyId);
+                        res.json({ message: 'Pagamento vinculado com sucesso!' });
+                    }
+                );
+                return;
             }
 
             db.get(`SELECT type, total_installments, current_installment FROM recurring_bills WHERE id = ? AND family_id = ?`, [recurringBillId, familyId], (errCheck, billRow) => {
