@@ -214,7 +214,7 @@ exports.getHomeData = async (req, res) => {
         // — atrasados, parcelas do modelo novo, status por data real) em vez de duplicar
         // essa lógica aqui. Já tivemos esse total divergindo da tela real por causa disso.
         const nowForFixed = new Date();
-        const pendingExpenses = (await computeExpensesForMonth(familyId, nowForFixed.getMonth() + 1, nowForFixed.getFullYear()))
+        const pendingExpenses = (await computeExpensesForMonth(familyId, nowForFixed.getMonth() + 1, nowForFixed.getFullYear(), null, currentUserId))
             .filter(e => e.status !== 'Pago' && e.type !== 'CREDIT_INVOICE');
 
         let fixedExpensesTotal = 0;

@@ -19,7 +19,24 @@ const allPromise = (sql, params) => new Promise((resolve, reject) => {
 // poder ser reaproveitado por outras telas (ex: o badge da Home) sem duplicar a
 // lógica de atrasados/parcelas/status. Lança em erro em vez de responder HTTP —
 // quem chama decide o que fazer.
-async function computeExpensesForMonth(familyId, month, year, filterType) {
+// Extrai os ids de membro de recurring_bills.member_id, que vem como um int solto,
+// uma string de int, ou um array JSON tipo "[1,2]" (conta com rateio entre vários).
+function parseMemberIds(memberIdRaw) {
+    if (!memberIdRaw) return [];
+    try {
+        const str = memberIdRaw.toString();
+        if (str.startsWith('[')) {
+            const parsed = JSON.parse(str);
+            return Array.isArray(parsed) ? parsed.map(Number) : [];
+        }
+        const n = parseInt(str, 10);
+        return isNaN(n) ? [] : [n];
+    } catch (e) {
+        return [];
+    }
+}
+
+async function computeExpensesForMonth(familyId, month, year, filterType, currentUserId) {
     // Convert filter month/year to a comparable date format (last day of the month) for start/end date checks
     const targetMonthEndStr = `${year}-${String(month).padStart(2, '0')}-${new Date(year, month, 0).getDate()}`;
     const targetMonthStartStr = `${year}-${String(month).padStart(2, '0')}-01`;
@@ -60,7 +77,17 @@ async function computeExpensesForMonth(familyId, month, year, filterType) {
     });
 
     try {
-        const rows = await queryPromise(query, params);
+        let rows = await queryPromise(query, params);
+
+        // Por usuário: conta sem member_id é da casa (rateada, aparece pra todo mundo);
+        // conta com member_id só aparece pra quem está na lista — se o usuário logado
+        // não está entre os donos, essa conta é de outra pessoa e não deve aparecer aqui.
+        if (currentUserId != null) {
+            rows = rows.filter(row => {
+                const memIds = parseMemberIds(row.member_id);
+                return memIds.length === 0 || memIds.includes(currentUserId);
+            });
+        }
 
         // Fetch all transactions for this family's recurring bills to check for historical payments
         // Group them by recurring_bill_id and YYYY-MM
@@ -497,7 +524,7 @@ exports.getFixedExpenses = async (req, res) => {
     const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
 
     try {
-        const expenses = await computeExpensesForMonth(familyId, month, year, filterType);
+        const expenses = await computeExpensesForMonth(familyId, month, year, filterType, req.user.id);
         res.json({ expenses });
     } catch (err) {
         res.status(500).json({ error: 'Erro interno no servidor' });

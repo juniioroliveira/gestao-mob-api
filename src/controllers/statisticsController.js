@@ -2,9 +2,28 @@ const db = require('../config/database');
 const { getIo } = require('../websockets/socket');
 const { triggerUpdate } = require('../services/financialEventService');
 
+// transactions.member_id vem como um int solto, string de int, ou array JSON tipo
+// "[1,2]" pra transação rateada entre membros. Mesmo parsing usado em outros
+// controllers (contas fixas, home) — mantém o critério de "rateio" consistente.
+function parseMemberIds(memberIdRaw) {
+    if (memberIdRaw === null || memberIdRaw === undefined) return [];
+    try {
+        const str = memberIdRaw.toString();
+        if (str.startsWith('[')) {
+            const parsed = JSON.parse(str);
+            return Array.isArray(parsed) ? parsed.map(Number) : [];
+        }
+        const n = parseInt(str, 10);
+        return isNaN(n) ? [] : [n];
+    } catch (e) {
+        return [];
+    }
+}
+
 exports.getStatisticsData = (req, res) => {
     const familyId = req.user.family_id;
-    
+    const currentUserId = req.user.id;
+
     // Pega o mês e ano da query string ou usa o atual por padrão
     const reqMonth = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
     const reqYear = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
@@ -16,58 +35,36 @@ exports.getStatisticsData = (req, res) => {
     const yearStr = currentYear.toString();
     const targetMonthStr = `${yearStr}-${monthStr}`;
 
-    // Query para obter os gastos por categoria e os orçamentos
+    // Categorias + orçamento do mês. "spent" não vem mais daqui — é recalculado
+    // mais abaixo a partir das transações já filtradas por usuário (member_id pode
+    // ser um array JSON rateado, SQL puro não faz esse parse direito).
     const query = `
-        SELECT 
+        SELECT
             c.id, c.name, c.color_hex, c.icon, c.type,
-            COALESCE(cb.budget_limit, 0) as budget_limit,
-            COALESCE(SUM(t_filtered.amount), 0) as spent
+            COALESCE(cb.budget_limit, 0) as budget_limit
         FROM categories c
         LEFT JOIN category_budgets cb ON c.id = cb.category_id AND cb.month = ? AND cb.year = ?
-        LEFT JOIN (
-            SELECT t.category_id, t.amount
-            FROM transactions t
-            JOIN accounts a ON t.account_id = a.id
-            WHERE t.type = 'EXPENSE' AND DATE_FORMAT(
-                 CASE 
-                     WHEN a.type = 'CREDIT' THEN
-                         DATE_ADD(
-                             t.transaction_date, 
-                             INTERVAL (
-                                 (CASE WHEN DAY(t.transaction_date) >= COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END) +
-                                 (CASE WHEN COALESCE(a.due_day, 1) < COALESCE(a.closing_day, 31) THEN 1 ELSE 0 END)
-                             ) MONTH
-                         )
-                     ELSE t.transaction_date 
-                 END, 
-                 '%Y-%m'
-            ) = ?
-        ) t_filtered ON c.id = t_filtered.category_id
         WHERE c.family_id = ?
-        GROUP BY c.id
     `;
 
     const runMainQuery = () => {
-        db.all(query, [currentMonth, currentYear, targetMonthStr, familyId], (err, rows) => {
+        db.all(query, [currentMonth, currentYear, familyId], (err, rows) => {
             if (err) {
                 console.error('Erro ao buscar estatísticas:', err);
                 return res.status(500).json({ error: 'Erro interno no servidor' });
             }
 
-            let totalExpense = 0;
-            const categories = rows.map(row => {
-                totalExpense += row.spent;
-                return {
-                    id: row.id,
-                    name: row.name,
-                    color: row.color_hex || '#CCCCCC',
-                    icon: row.icon || 'category',
-                    type: row.type || 'EXPENSE',
-                    limit: row.budget_limit,
-                    spent: row.spent,
-                    percentage: row.budget_limit > 0 ? (row.spent / row.budget_limit) : 0
-                };
-            });
+            // "spent" por categoria é recalculado mais abaixo, a partir das transações já
+            // filtradas por usuário — o SUM aqui na SQL ainda é da família inteira, não dá
+            // pra ratear direto (member_id pode ser um array JSON, SQL não faz esse parse).
+            const categoriesMeta = rows.map(row => ({
+                id: row.id,
+                name: row.name,
+                color: row.color_hex || '#CCCCCC',
+                icon: row.icon || 'category',
+                type: row.type || 'EXPENSE',
+                limit: row.budget_limit,
+            }));
 
             // Buscar histórico de transações do mês
             const transactionsQuery = `
@@ -105,7 +102,14 @@ exports.getStatisticsData = (req, res) => {
                 // Precisamos buscar os membros para mapear os nomes
                 db.all(`SELECT id, name FROM members WHERE family_id = ?`, [familyId], (err4, membersRows) => {
                     const members = membersRows || [];
-                    const finalTransactions = transactionsRows.map(t => {
+
+                    // Por usuário: só entra transação em que o usuário logado está entre os
+                    // donos — sem member_id definido não existe pra transação (sempre tem um
+                    // responsável), mas se for rateada (array com vários ids) ainda aparece
+                    // normalmente pra todo mundo que está nela.
+                    const myTransactionsRows = transactionsRows.filter(t => parseMemberIds(t.member_id).includes(currentUserId));
+
+                    const finalTransactions = myTransactionsRows.map(t => {
                         let memberName = 'Desconhecido';
                         try {
                             const memIds = JSON.parse(t.member_id);
@@ -126,13 +130,36 @@ exports.getStatisticsData = (req, res) => {
                         return { ...t, member_name: memberName };
                     });
 
-                    // Buscar receita total do mês baseada na previsão de renda dos membros da família
+                    // Recalcula "spent" por categoria e o total de despesas a partir das
+                    // transações já filtradas por usuário (rateio: se a transação é
+                    // compartilhada com outro membro, conta o valor cheio mesmo assim, pois
+                    // representa o gasto real que passou pela conta do usuário).
+                    let totalExpense = 0;
+                    const spentByCategory = {};
+                    myTransactionsRows.forEach(t => {
+                        if (t.type !== 'EXPENSE') return;
+                        const amount = Number(t.amount) || 0;
+                        totalExpense += amount;
+                        if (t.category_id != null) {
+                            spentByCategory[t.category_id] = (spentByCategory[t.category_id] || 0) + amount;
+                        }
+                    });
+                    const categories = categoriesMeta.map(cat => {
+                        const spent = spentByCategory[cat.id] || 0;
+                        return {
+                            ...cat,
+                            spent,
+                            percentage: cat.limit > 0 ? (spent / cat.limit) : 0
+                        };
+                    });
+
+                    // Renda declarada — só a do usuário logado, não a soma da família.
                     const incomeQuery = `
-                        SELECT COALESCE(SUM(COALESCE(monthly_income, 0)), 0) as totalIncome
+                        SELECT COALESCE(monthly_income, 0) as totalIncome
                         FROM members
-                        WHERE family_id = ?
+                        WHERE family_id = ? AND id = ?
                     `;
-                    db.get(incomeQuery, [familyId], (err3, incomeRow) => {
+                    db.get(incomeQuery, [familyId, currentUserId], (err3, incomeRow) => {
                         if (err3) {
                             console.error('Erro ao buscar receitas na estatística:', err3);
                             return res.status(500).json({ error: 'Erro interno no servidor' });
