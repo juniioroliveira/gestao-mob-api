@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "build": "git add -A && git diff --cached --quiet || (git commit -m \"chore: auto-commit changes\" && git push origin main)"
+    "build": "git add -A && git diff --cached --quiet || (git commit -m \"chore: auto-commit changes\" && git push origin main)",
+    "verify-deploy": "node scripts/verify-deploy.js"
   },
   "dependencies": {
     "@google/genai": "^2.15.0",

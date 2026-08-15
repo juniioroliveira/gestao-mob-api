@@ -2,7 +2,20 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const cors = require('cors');
+const { execSync } = require('child_process');
 require('dotenv').config();
+
+// Commit que este processo tem carregado em memória, capturado uma única vez na
+// subida do servidor — não a cada request. É a resposta pra "o código novo já está
+// rodando de verdade aqui?", não só "o arquivo já foi atualizado no disco?": um
+// `git pull` sem reiniciar o processo não muda esse valor, do jeito certo.
+let CURRENT_COMMIT = 'unknown';
+try {
+    CURRENT_COMMIT = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim();
+} catch (e) {
+    console.warn('⚠️  Não foi possível obter o commit atual via git:', e.message);
+}
+const SERVER_STARTED_AT = new Date().toISOString();
 
 // Inicializando a Conexão com o Banco (SQLite)
 const db = require('./config/database');
@@ -58,6 +71,17 @@ app.get('/', (req, res) => {
         message: 'Bem-vindo ao Backend da Gestão Mob! 🚀',
         status: 'Online',
         websocket: 'Ativo'
+    });
+});
+
+// Mesmo espírito do version.json do app Flutter: deixa qualquer um confirmar,
+// depois de um deploy, se o commit novo já está de fato rodando aqui — não só
+// se já chegou no GitHub ou no disco do servidor.
+app.get('/version.json', (req, res) => {
+    res.status(200).json({
+        commit: CURRENT_COMMIT,
+        commit_short: CURRENT_COMMIT === 'unknown' ? 'unknown' : CURRENT_COMMIT.substring(0, 7),
+        server_started_at: SERVER_STARTED_AT,
     });
 });
 
