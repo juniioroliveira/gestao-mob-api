@@ -20,6 +20,58 @@ const getQuery = (query, params) => {
     });
 };
 
+/**
+ * Ponto único de entrada pro processamento de um documento recebido na inbox.
+ * As duas origens possíveis (Atalho iOS -> upload direto em memória, ou
+ * Compartilhamento Android -> arquivo já salvo em disco) só diferem em COMO
+ * o arquivo chega até aqui; a partir daqui o fluxo é sempre o mesmo:
+ * grava PENDING, avisa o app via WebSocket e dispara a IA em background.
+ *
+ * @param {object} params
+ * @param {number} params.familyId
+ * @param {number} params.memberId
+ * @param {Buffer} params.fileBuffer - conteúdo do arquivo, sempre necessário (é o que vai pra IA)
+ * @param {string} params.mimeType
+ * @param {string} params.fileName
+ * @param {string} [params.relativeFilePath] - presente quando o arquivo já foi salvo em disco
+ *   (ex: 'uploads/123.jpg'); se ausente, o conteúdo é persistido em base64 no próprio banco.
+ * @returns {Promise<number>} documentId criado
+ */
+async function createAndProcessDocument({ familyId, memberId, fileBuffer, mimeType, fileName, relativeFilePath }) {
+    const fileType = mimeType.includes('pdf') ? 'pdf' : (mimeType.includes('image') ? 'image' : 'unknown');
+    const isDiskFile = !!relativeFilePath;
+
+    const insertDocQuery = isDiskFile
+        ? `INSERT INTO inbox_documents (family_id, member_id, file_path, file_name, file_type, status)
+           VALUES (?, ?, ?, ?, ?, 'PENDING')`
+        : `INSERT INTO inbox_documents (family_id, member_id, file_path, file_name, file_type, file_base64, status)
+           VALUES (?, ?, 'db_base64', ?, ?, ?, 'PENDING')`;
+
+    const params = isDiskFile
+        ? [familyId, memberId, relativeFilePath, fileName, fileType]
+        : [familyId, memberId, fileName, fileType, fileBuffer.toString('base64')];
+
+    // 1. Salvar no banco como PENDING
+    const result = await runQuery(insertDocQuery, params);
+    const documentId = result.lastID;
+
+    // 2. Avisar o app de que um novo documento chegou (some da lista o "vazio" e já entra como PENDING)
+    const { getIo } = require('../websockets/socket');
+    const io = getIo();
+    if (io) {
+        io.to(`family_${familyId}`).emit('data_updated', { source: 'documents', action: 'created' });
+    }
+
+    // 3. Chamar processamento em background (solto — não bloqueia a resposta HTTP)
+    processDocumentAsync(documentId, familyId, memberId, fileBuffer, mimeType).catch(err => {
+        console.error('[Background AI] Erro fatal no processDocumentAsync:', err);
+    });
+
+    return documentId;
+}
+
+exports.createAndProcessDocument = createAndProcessDocument;
+
 exports.processUpload = async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'Nenhum arquivo enviado' });
@@ -27,42 +79,20 @@ exports.processUpload = async (req, res) => {
 
     const familyId = req.user.family_id;
     const memberId = req.user.id;
-    const fileBuffer = req.file.buffer;
-    const mimeType = req.file.mimetype;
 
     try {
-        const base64Data = fileBuffer.toString('base64');
-        const fileName = req.file.originalname || 'comprovante.jpg';
+        const documentId = await createAndProcessDocument({
+            familyId,
+            memberId,
+            fileBuffer: req.file.buffer,
+            mimeType: req.file.mimetype,
+            fileName: req.file.originalname || 'comprovante.jpg',
+        });
 
-        // 1. Salvar no banco como PENDING
-        const insertDocQuery = `
-            INSERT INTO inbox_documents (family_id, member_id, file_path, file_name, file_type, file_base64, status)
-            VALUES (?, ?, 'db_base64', ?, ?, ?, 'PENDING')
-        `;
-        const result = await runQuery(insertDocQuery, [familyId, memberId, fileName, mimeType, base64Data]);
-        const documentId = result.lastID;
-
-        // 2. Retornar SUCESSO imediato para o celular
-        res.status(200).json({ 
+        res.status(200).json({
             message: 'Comprovante recebido! Processando com IA em segundo plano...',
             documentId
         });
-
-        // Emitir evento para o Frontend de que um novo documento chegou
-        const { getIo } = require('../websockets/socket');
-        const io = getIo();
-        if (io) {
-            io.to(`family_${familyId}`).emit('data_updated', {
-                source: 'documents',
-                action: 'created'
-            });
-        }
-
-        // 3. Chamar processamento em background (solto)
-        processDocumentAsync(documentId, familyId, memberId, fileBuffer, mimeType).catch(err => {
-            console.error('[Background AI] Erro fatal no processDocumentAsync:', err);
-        });
-
     } catch (error) {
         console.error('Erro no processUpload:', error);
         res.status(500).json({ error: 'Erro interno no servidor' });

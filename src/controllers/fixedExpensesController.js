@@ -82,6 +82,13 @@ exports.getFixedExpenses = async (req, res) => {
         const membersRows = await queryPromise(`SELECT id, name, avatar_url FROM members WHERE family_id = ?`, [familyId]);
         const members = membersRows || [];
 
+        // Data real de hoje — usada abaixo pra decidir o que é "atrasado de verdade",
+        // independente do mês que o usuário está navegando na tela.
+        const realToday = new Date();
+        realToday.setHours(0, 0, 0, 0);
+        const realCurrentYear = realToday.getFullYear();
+        const realCurrentMonth = realToday.getMonth() + 1;
+
         const expenses = [];
 
         for (const row of rows) {
@@ -164,33 +171,49 @@ exports.getFixedExpenses = async (req, res) => {
                         break; // Exceeded installments
                     }
                 }
-                
-                const monthStr = `${currY}-${String(currM).padStart(2, '0')}`;
-                
-                // If this historical month was not paid, generate an overdue instance
-                if (!paidMap[row.id] || !paidMap[row.id].has(monthStr)) {
-                    const exp = getBaseExpenseObj();
-                    exp.status = 'Atrasado';
-                    exp.statusColor = '#F44336';
-                    exp.isOverdue = true;
-                    exp.referenceMonth = monthStr; // e.g. "2026-07"
-                    
-                    let calcInstallment = row.current_installment;
-                    if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
-                        const diffM = (currY - startYear) * 12 + (currM - startMonth);
-                        calcInstallment = diffM + 1;
-                        exp.currentInstallment = calcInstallment;
-                        exp.installmentLabel = `Parcela ${calcInstallment}/${row.total_installments}`;
-                    } else {
-                        exp.currentInstallment = calcInstallment;
-                        exp.installmentLabel = null;
-                    }
-                    
-                    // Modify ID so it's unique in the frontend list
-                    exp.id = `${row.id}_${monthStr}`;
-                    expenses.push(exp);
+
+                // "Atrasado" é decidido pela data REAL de hoje, nunca pelo mês que o
+                // usuário está navegando — senão, ao navegar pra um mês futuro, o mês
+                // atual (ainda em aberto, nem vencido) aparecia incorretamente como atrasado.
+                const isBeforeRealCurrentMonth = (currY < realCurrentYear) || (currY === realCurrentYear && currM < realCurrentMonth);
+                const isRealCurrentMonth = (currY === realCurrentYear && currM === realCurrentMonth);
+                let isGenuinelyOverdue = isBeforeRealCurrentMonth;
+                if (!isGenuinelyOverdue && isRealCurrentMonth) {
+                    const dueFullDateCheck = new Date(currY, currM - 1, row.due_day);
+                    isGenuinelyOverdue = dueFullDateCheck < realToday;
                 }
-                
+                // Se currY/currM ainda está no futuro (entre hoje e o mês navegado), a conta
+                // ainda nem venceu — não gera linha nenhuma aqui, ela aparece na seção 2
+                // quando o usuário efetivamente navegar até aquele mês.
+
+                if (isGenuinelyOverdue) {
+                    const monthStr = `${currY}-${String(currM).padStart(2, '0')}`;
+
+                    // If this historical month was not paid, generate an overdue instance
+                    if (!paidMap[row.id] || !paidMap[row.id].has(monthStr)) {
+                        const exp = getBaseExpenseObj();
+                        exp.status = 'Atrasado';
+                        exp.statusColor = '#F44336';
+                        exp.isOverdue = true;
+                        exp.referenceMonth = monthStr; // e.g. "2026-07"
+
+                        let calcInstallment = row.current_installment;
+                        if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+                            const diffM = (currY - startYear) * 12 + (currM - startMonth);
+                            calcInstallment = diffM + 1;
+                            exp.currentInstallment = calcInstallment;
+                            exp.installmentLabel = `Parcela ${calcInstallment}/${row.total_installments}`;
+                        } else {
+                            exp.currentInstallment = calcInstallment;
+                            exp.installmentLabel = null;
+                        }
+
+                        // Modify ID so it's unique in the frontend list
+                        exp.id = `${row.id}_${monthStr}`;
+                        expenses.push(exp);
+                    }
+                }
+
                 currM++;
                 if (currM > 12) {
                     currM = 1;

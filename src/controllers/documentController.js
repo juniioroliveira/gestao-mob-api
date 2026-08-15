@@ -1,45 +1,48 @@
 const db = require('../config/database');
 const fs = require('fs');
 const path = require('path');
+const { createAndProcessDocument } = require('./inboxController');
 
-exports.uploadDocument = (req, res) => {
+exports.uploadDocument = async (req, res) => {
     const familyId = req.user.family_id;
     const memberId = req.user.id;
-    
+
     if (!req.file) {
         return res.status(400).json({ error: 'Nenhum arquivo recebido' });
     }
 
-    const { filename, path: filePath, mimetype } = req.file;
-    let fileType = 'unknown';
-    
-    if (mimetype.includes('pdf')) fileType = 'pdf';
-    else if (mimetype.includes('image')) fileType = 'image';
+    const { filename, path: filePath, mimetype, originalname } = req.file;
+    const relativeFilePath = `uploads/${filename}`;
 
-    const relativePath = `uploads/${filename}`;
+    try {
+        // Multer salvou em disco (diskStorage) — lemos o buffer só pra alimentar a IA,
+        // o arquivo em si já está persistido em uploads/.
+        const fileBuffer = fs.readFileSync(filePath);
 
-    const query = `
-        INSERT INTO inbox_documents (family_id, member_id, file_path, file_name, file_type, status)
-        VALUES (?, ?, ?, ?, ?, 'PENDING')
-    `;
+        // Mesma lógica de processamento usada pelo Atalho do iOS (inboxController):
+        // grava PENDING, avisa o app via WebSocket e dispara a IA em background.
+        const documentId = await createAndProcessDocument({
+            familyId,
+            memberId,
+            fileBuffer,
+            mimeType: mimetype,
+            fileName: originalname,
+            relativeFilePath,
+        });
 
-    db.run(query, [familyId, memberId, relativePath, req.file.originalname, fileType], function(err) {
-        if (err) {
-            console.error('Erro ao salvar documento:', err);
-            // Optionally delete the file if DB insert fails
-            fs.unlinkSync(filePath);
-            return res.status(500).json({ error: 'Erro ao salvar o registro no banco' });
-        }
-        
-        res.status(201).json({ 
+        res.status(201).json({
             message: 'Documento recebido com sucesso',
             document: {
-                // Cannot use this.lastID easily across compatibility layers, we just return success
-                fileName: req.file.originalname,
+                id: documentId,
+                fileName: originalname,
                 status: 'PENDING'
             }
         });
-    });
+    } catch (err) {
+        console.error('Erro ao salvar documento:', err);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        return res.status(500).json({ error: 'Erro ao salvar o registro no banco' });
+    }
 };
 
 exports.getInboxDocuments = (req, res) => {
