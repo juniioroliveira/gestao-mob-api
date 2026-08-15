@@ -18,14 +18,17 @@ exports.getHomeData = async (req, res) => {
 
         // 1. Contas e Saldos
         const accounts = await queryPromise(
-            `SELECT id, name, current_balance, type, bank_code, color_hex, card_last_digits, is_debit, is_credit, credit_limit, closing_day, due_day FROM accounts WHERE family_id = ?`, 
+            `SELECT id, name, current_balance, type, member_id, bank_code, color_hex, card_last_digits, is_debit, is_credit, credit_limit, closing_day, due_day FROM accounts WHERE family_id = ?`,
             [familyId]
         );
-        
+
+        const [familyMembersCountRow] = await queryPromise(`SELECT COUNT(*) as count FROM members WHERE family_id = ?`, [familyId]);
+        const familyMemberCount = familyMembersCountRow?.count || 1;
+
         let totalBalance = 0;
         let totalInvestments = 0;
         let creditCardDebt = 0; // Armazena a dívida de cartão de crédito para subtrair do saldo livre
-        
+
         accounts.forEach(acc => {
             if (acc.type === 'CREDIT') {
                 // Cartão de crédito geralmente tem saldo negativo, mas por segurança somamos o absoluto
@@ -33,7 +36,16 @@ exports.getHomeData = async (req, res) => {
             } else if (acc.type === 'INVESTMENT') {
                 totalInvestments += acc.current_balance;
             } else {
-                totalBalance += acc.current_balance;
+                // Rateio: conta com dono específico (member_id) conta só pra esse usuário;
+                // conta compartilhada (sem member_id) divide igualmente entre todos os membros
+                // da família — mesma regra já usada no total de Contas a Pagar.
+                if (acc.member_id) {
+                    if (acc.member_id === currentUserId) {
+                        totalBalance += acc.current_balance;
+                    }
+                } else {
+                    totalBalance += acc.current_balance / familyMemberCount;
+                }
             }
         });
 
