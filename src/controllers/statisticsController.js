@@ -35,13 +35,13 @@ exports.getStatisticsData = (req, res) => {
     const yearStr = currentYear.toString();
     const targetMonthStr = `${yearStr}-${monthStr}`;
 
-    // Categorias + orçamento do mês. "spent" não vem mais daqui — é recalculado
-    // mais abaixo a partir das transações já filtradas por usuário (member_id pode
-    // ser um array JSON rateado, SQL puro não faz esse parse direito).
+    // Categorias + orçamento do mês. O limite é um PERCENTUAL da renda (de quem está
+    // vendo), não mais um valor em R$ travado — "spent" e o R$ do limite são
+    // recalculados mais abaixo, depois que soubermos a renda relevante.
     const query = `
         SELECT
             c.id, c.name, c.color_hex, c.icon, c.type,
-            COALESCE(cb.budget_limit, 0) as budget_limit
+            cb.budget_percent
         FROM categories c
         LEFT JOIN category_budgets cb ON c.id = cb.category_id AND cb.month = ? AND cb.year = ?
         WHERE c.family_id = ?
@@ -54,16 +54,13 @@ exports.getStatisticsData = (req, res) => {
                 return res.status(500).json({ error: 'Erro interno no servidor' });
             }
 
-            // "spent" por categoria é recalculado mais abaixo, a partir das transações já
-            // filtradas por usuário — o SUM aqui na SQL ainda é da família inteira, não dá
-            // pra ratear direto (member_id pode ser um array JSON, SQL não faz esse parse).
             const categoriesMeta = rows.map(row => ({
                 id: row.id,
                 name: row.name,
                 color: row.color_hex || '#CCCCCC',
                 icon: row.icon || 'category',
                 type: row.type || 'EXPENSE',
-                limit: row.budget_limit,
+                percent: row.budget_percent != null ? Number(row.budget_percent) : 0,
             }));
 
             // Buscar histórico de transações do mês
@@ -144,16 +141,9 @@ exports.getStatisticsData = (req, res) => {
                             spentByCategory[t.category_id] = (spentByCategory[t.category_id] || 0) + amount;
                         }
                     });
-                    const categories = categoriesMeta.map(cat => {
-                        const spent = spentByCategory[cat.id] || 0;
-                        return {
-                            ...cat,
-                            spent,
-                            percentage: cat.limit > 0 ? (spent / cat.limit) : 0
-                        };
-                    });
-
-                    // Renda declarada — só a do usuário logado, não a soma da família.
+                    // Renda declarada — só a do usuário logado, não a soma da família. O
+                    // limite de cada categoria (em R$) é sempre o percentual salvo aplicado
+                    // sobre ESSA renda, calculado na hora — nunca um valor travado no banco.
                     const incomeQuery = `
                         SELECT COALESCE(monthly_income, 0) as totalIncome
                         FROM members
@@ -165,9 +155,21 @@ exports.getStatisticsData = (req, res) => {
                             return res.status(500).json({ error: 'Erro interno no servidor' });
                         }
 
+                        const totalIncome = incomeRow ? incomeRow.totalIncome : 0;
+                        const categories = categoriesMeta.map(cat => {
+                            const spent = spentByCategory[cat.id] || 0;
+                            const limit = (cat.percent / 100) * totalIncome;
+                            return {
+                                ...cat,
+                                spent,
+                                limit,
+                                percentage: limit > 0 ? (spent / limit) : 0
+                            };
+                        });
+
                         res.json({
                             totalExpense,
-                            totalIncome: incomeRow ? incomeRow.totalIncome : 0,
+                            totalIncome,
                             categories,
                             transactions: finalTransactions
                         });
@@ -203,25 +205,27 @@ exports.getStatisticsData = (req, res) => {
 
 exports.createCategory = (req, res) => {
     const familyId = req.user.family_id;
-    const { name, color, icon, type, limit } = req.body;
-    
+    const { name, color, icon, type, percent } = req.body;
+
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
 
     if (!name) return res.status(400).json({ error: 'O nome da categoria é obrigatório' });
 
     const insertQuery = `INSERT INTO categories (family_id, name, type, color_hex, icon) VALUES (?, ?, ?, ?, ?)`;
-    
+
     db.run(insertQuery, [familyId, name, type || 'EXPENSE', color || '#CCCCCC', icon || 'category'], function(err) {
         if (err) return res.status(500).json({ error: 'Erro ao criar categoria' });
-        
+
         const categoryId = this.lastID;
-        
-        // Se um limite foi enviado, salva na tabela de orçamentos para o mês atual
-        if (limit !== undefined && limit >= 0) {
+
+        // Se um percentual foi enviado, salva na tabela de orçamentos para o mês atual.
+        // O limite em R$ é sempre derivado desse percentual na hora de exibir, nunca
+        // gravado como valor fixo aqui.
+        if (percent !== undefined && percent >= 0) {
             db.run(
-                `INSERT INTO category_budgets (category_id, month, year, budget_limit) VALUES (?, ?, ?, ?)`,
-                [categoryId, currentMonth, currentYear, limit],
+                `INSERT INTO category_budgets (category_id, month, year, budget_percent) VALUES (?, ?, ?, ?)`,
+                [categoryId, currentMonth, currentYear, percent],
                 (err2) => {
                     if (err2) console.error('Erro ao salvar limite', err2);
                     getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'created' });
@@ -240,8 +244,8 @@ exports.createCategory = (req, res) => {
 exports.updateCategory = (req, res) => {
     const familyId = req.user.family_id;
     const categoryId = req.params.id;
-    const { name, color, icon, limit } = req.body;
-    
+    const { name, color, icon, percent } = req.body;
+
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
 
@@ -251,20 +255,20 @@ exports.updateCategory = (req, res) => {
 
         const updates = [];
         const params = [];
-        
+
         if (name) { updates.push('name = ?'); params.push(name); }
         if (color) { updates.push('color_hex = ?'); params.push(color); }
         if (icon) { updates.push('icon = ?'); params.push(icon); }
-        
+
         const updateCategoryAndLimit = () => {
-            if (limit !== undefined && limit >= 0) {
-                // Atualiza ou insere o limite para o mês atual (Upsert)
+            if (percent !== undefined && percent >= 0) {
+                // Atualiza ou insere o percentual para o mês atual (Upsert)
                 const upsertLimit = `
-                    INSERT INTO category_budgets (category_id, month, year, budget_limit)
+                    INSERT INTO category_budgets (category_id, month, year, budget_percent)
                     VALUES (?, ?, ?, ?)
-                    ON CONFLICT(category_id, month, year) DO UPDATE SET budget_limit = excluded.budget_limit
+                    ON CONFLICT(category_id, month, year) DO UPDATE SET budget_percent = excluded.budget_percent
                 `;
-                db.run(upsertLimit, [categoryId, currentMonth, currentYear, limit], (errLimit) => {
+                db.run(upsertLimit, [categoryId, currentMonth, currentYear, percent], (errLimit) => {
                     if (errLimit) console.error('Erro ao atualizar limite', errLimit);
                     getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'updated' });
                     triggerUpdate(familyId);
@@ -279,7 +283,8 @@ exports.updateCategory = (req, res) => {
 
         if (updates.length > 0) {
             params.push(categoryId);
-            const query = `UPDATE categories SET ${updates.join(', ')} WHERE id = ?`;
+            const query = `UPDATE categories SET ${updates.join(', ')} WHERE id = ? AND family_id = ?`;
+            params.push(familyId);
             db.run(query, params, (errUpdate) => {
                 if (errUpdate) return res.status(500).json({ error: 'Erro ao atualizar dados básicos' });
                 updateCategoryAndLimit();
@@ -294,16 +299,33 @@ exports.deleteCategory = (req, res) => {
     const familyId = req.user.family_id;
     const categoryId = req.params.id;
 
-    db.run(`DELETE FROM category_budgets WHERE category_id = ?`, [categoryId], (err) => {
-        if (err) console.error('Erro ao deletar orçamentos:', err);
-        
-        db.run(`DELETE FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId], function(err2) {
-            if (err2) return res.status(500).json({ error: 'Erro ao excluir categoria' });
-            if (this.changes === 0) return res.status(404).json({ error: 'Categoria não encontrada' });
-            
-            getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'deleted' });
-            triggerUpdate(familyId);
-            res.json({ message: 'Categoria excluída com sucesso' });
+    // Confirma posse ANTES de apagar qualquer coisa — apagar category_budgets primeiro
+    // sem checar a família permitiria apagar orçamento de categoria de outra família
+    // mesmo que a exclusão da categoria em si fosse bloqueada logo em seguida.
+    db.get(`SELECT id FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId], (errCheck, row) => {
+        if (errCheck) return res.status(500).json({ error: 'Erro interno no servidor' });
+        if (!row) return res.status(404).json({ error: 'Categoria não encontrada' });
+
+        db.run(`DELETE FROM category_budgets WHERE category_id = ?`, [categoryId], (err) => {
+            if (err) console.error('Erro ao deletar orçamentos:', err);
+
+            db.run(`DELETE FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId], function(err2) {
+                if (err2) {
+                    // category_id em transactions/recurring_bills é ON DELETE RESTRICT —
+                    // categoria em uso não pode ser excluída; dá pra reconhecer isso pelo
+                    // código do erro do MySQL em vez de devolver um 500 genérico.
+                    const isInUse = err2.code === 'ER_ROW_IS_REFERENCED_2' || err2.code === 'ER_ROW_IS_REFERENCED' || err2.errno === 1451;
+                    if (isInUse) {
+                        return res.status(409).json({ error: 'Essa categoria tem transações ou contas fixas vinculadas e não pode ser excluída.' });
+                    }
+                    return res.status(500).json({ error: 'Erro ao excluir categoria' });
+                }
+                if (this.changes === 0) return res.status(404).json({ error: 'Categoria não encontrada' });
+
+                getIo().to(`family_${familyId}`).emit('data_updated', { source: 'categories', action: 'deleted' });
+                triggerUpdate(familyId);
+                res.json({ message: 'Categoria excluída com sucesso' });
+            });
         });
     });
 };
