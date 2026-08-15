@@ -25,7 +25,7 @@ async function computeExpensesForMonth(familyId, month, year, filterType) {
     const targetMonthStartStr = `${year}-${String(month).padStart(2, '0')}-01`;
 
     let query = `
-        SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_auto_pay, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
+        SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
                rb.type, rb.total_installments, rb.current_installment, rb.start_date, rb.end_date, rb.created_at,
                c.name as category_name, c.color_hex as category_color,
                (SELECT COUNT(*) FROM transactions t 
@@ -156,7 +156,6 @@ async function computeExpensesForMonth(familyId, month, year, filterType) {
                 rawAmount: row.amount,
                 dueDate: `Dia ${row.due_day}`,
                 dueDay: row.due_day,
-                isAutoPay: Boolean(row.is_auto_pay),
                 isActive: Boolean(row.is_active),
                 categoryId: row.category_id,
                 categoryName: row.category_name,
@@ -199,7 +198,6 @@ async function computeExpensesForMonth(familyId, month, year, filterType) {
                         rawAmount: inst.amount,
                         dueDate: `${String(instDate.getDate()).padStart(2, '0')}/${String(instMonth).padStart(2, '0')}`,
                         dueDay: instDate.getDate(),
-                        isAutoPay: Boolean(row.is_auto_pay),
                         isActive: Boolean(row.is_active),
                         categoryId: row.category_id,
                         categoryName: row.category_name,
@@ -464,7 +462,6 @@ async function computeExpensesForMonth(familyId, month, year, filterType) {
                         rawAmount: spent,
                         dueDate: card.due_day ? `Dia ${card.due_day}` : 'S/ Data',
                         dueDay: card.due_day || 31,
-                        isAutoPay: false,
                         isActive: true,
                         categoryId: null,
                         categoryName: 'Cartão de Crédito',
@@ -617,7 +614,7 @@ function normalizeInstallments(installments) {
 
 exports.createFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
-    let { name, amount, dueDay, isAutoPay, categoryId, memberId, accountId, paymentType, type, totalInstallments, startDate, installments } = req.body;
+    let { name, amount, dueDay, categoryId, memberId, accountId, paymentType, type, totalInstallments, startDate, installments } = req.body;
 
     if (paymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -657,7 +654,7 @@ exports.createFixedExpense = async (req, res) => {
         name,
         amount || null,
         dueDay,
-        isAutoPay ? 1 : 0,
+        0, // is_auto_pay — recurso removido (não havia automação real por trás)
         accountId || null,
         paymentType || null,
         expenseType,
@@ -692,7 +689,7 @@ exports.createFixedExpense = async (req, res) => {
 exports.updateFixedExpense = async (req, res) => {
     const familyId = req.user.family_id;
     const expenseId = req.params.id;
-    let { name, amount, dueDay, isAutoPay, isActive, categoryId, memberId, accountId, paymentType, type, totalInstallments, currentInstallment, startDate, endDate, installments } = req.body;
+    let { name, amount, dueDay, isActive, categoryId, memberId, accountId, paymentType, type, totalInstallments, currentInstallment, startDate, endDate, installments } = req.body;
 
     if (paymentType === 'CASH' && !accountId) {
         accountId = await getOrCreateWalletAccountId(familyId);
@@ -715,7 +712,7 @@ exports.updateFixedExpense = async (req, res) => {
 
     const query = `
         UPDATE recurring_bills
-        SET name = ?, amount = ?, due_day = ?, is_auto_pay = ?, is_active = ?, category_id = ?, member_id = ?, account_id = ?, payment_type = ?,
+        SET name = ?, amount = ?, due_day = ?, is_active = ?, category_id = ?, member_id = ?, account_id = ?, payment_type = ?,
             type = ?, total_installments = ?, current_installment = ?, start_date = ?, end_date = ?
         WHERE id = ? AND family_id = ?
     `;
@@ -723,7 +720,6 @@ exports.updateFixedExpense = async (req, res) => {
         name,
         amount || null,
         dueDay,
-        isAutoPay ? 1 : 0,
         isActive !== undefined ? (isActive ? 1 : 0) : 1,
         categoryId,
         memberId || null,
