@@ -17,7 +17,7 @@ async function runTest() {
     ];
 
     try {
-        console.log('Enviando para o Gemini (gemini-flash-latest)...');
+        console.log('Enviando para o Gemini (gemini-3.5-flash-lite)...');
         const result = await extractReceiptWithAI(dummyImage, 'image/png', fakeCategories, fakeAccounts);
         console.log('✅ SUCESSO! Resposta do Gemini:');
         console.log(result);

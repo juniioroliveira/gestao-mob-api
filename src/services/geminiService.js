@@ -4,13 +4,13 @@ const apiKey = process.env.GEMINI_API_KEY;
 let ai = null;
 if (apiKey) {
     ai = new GoogleGenAI({ apiKey });
-    console.log('✨ Serviço Gemini Flash inicializado com sucesso.');
+    console.log('✨ Serviço Gemini Flash-Lite inicializado com sucesso.');
 } else {
     console.warn('⚠️ GEMINI_API_KEY não configurada no arquivo .env. Enriquecimento por IA ficará desativado.');
 }
 
 /**
- * Enriquece e categoriza uma lista de transações brutas usando Gemini 2.5 Flash.
+ * Enriquece e categoriza uma lista de transações brutas usando Gemini Flash-Lite.
  * 
  * @param {number} familyId ID da família do usuário
  * @param {Array} transactions Lista de transações brutas do OFX ou notificações
@@ -69,7 +69,8 @@ ${JSON.stringify(transactions.map(t => ({
 `;
 
         const response = await ai.models.generateContent({
-            model: 'gemini-flash-latest',
+            model: 'gemini-3.5-flash-lite', // Flash-Lite: mesma tarefa (extração/categorização simples) sem o
+            // custo de raciocínio do Flash completo — mais rápido e com cota própria, separada do gemini-flash-latest.
             contents: prompt,
             config: {
                 systemInstruction: systemInstruction,
@@ -96,13 +97,13 @@ ${JSON.stringify(transactions.map(t => ({
         });
 
     } catch (error) {
-        console.error('❌ Erro durante o processamento do Gemini Flash:', error);
+        console.error('❌ Erro durante o processamento do Gemini Flash-Lite:', error);
         return transactions;
     }
 }
 
 /**
- * Analisa a imagem/PDF de um comprovante e extrai os dados financeiros usando Gemini 2.5 Flash.
+ * Analisa a imagem/PDF de um comprovante e extrai os dados financeiros usando Gemini Flash-Lite.
  * 
  * @param {Buffer} fileBuffer Buffer do arquivo enviado (imagem ou PDF)
  * @param {string} mimeType MimeType do arquivo
@@ -146,7 +147,8 @@ ${JSON.stringify(accountsList, null, 2)}
     while (retries > 0) {
         try {
             const response = await ai.models.generateContent({
-                model: 'gemini-flash-latest',
+                model: 'gemini-3.5-flash-lite', // Flash-Lite: mesma tarefa (extração/categorização simples) sem o
+            // custo de raciocínio do Flash completo — mais rápido e com cota própria, separada do gemini-flash-latest.
                 contents: [
                     prompt,
                     { inlineData: { data: fileBuffer.toString('base64'), mimeType: mimeType } }
