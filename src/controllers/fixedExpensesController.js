@@ -730,15 +730,43 @@ exports.updateFixedExpense = async (req, res) => {
         }
 
         if (normalizedInstallments) {
-            // Reconciliação simples: substitui a lista inteira em vez de tentar casar
-            // parcela por parcela (evita ambiguidade quando datas/valores mudam junto).
-            await runPromise(`DELETE FROM recurring_bill_installments WHERE recurring_bill_id = ?`, [expenseId]);
+            // Reconciliação por posição, preservando parcelas já PAGAS intactas — nunca
+            // apaga/recria tudo, senão qualquer edição desmarcaria pagamentos já feitos.
+            const existing = await allPromise(
+                `SELECT id, installment_number, amount, due_date, status, transaction_id
+                 FROM recurring_bill_installments WHERE recurring_bill_id = ? ORDER BY installment_number ASC`,
+                [expenseId]
+            );
+
             for (let i = 0; i < normalizedInstallments.length; i++) {
                 const inst = normalizedInstallments[i];
-                await runPromise(
-                    `INSERT INTO recurring_bill_installments (recurring_bill_id, installment_number, amount, due_date) VALUES (?, ?, ?, ?)`,
-                    [expenseId, i + 1, inst.amount, inst.dueDate]
-                );
+                const existingRow = existing[i];
+
+                if (existingRow && existingRow.status === 'PAID') {
+                    // Já paga: não mexe em valor/data/status, só garante a posição certa.
+                    await runPromise(`UPDATE recurring_bill_installments SET installment_number = ? WHERE id = ?`, [i + 1, existingRow.id]);
+                    continue;
+                }
+
+                if (existingRow) {
+                    await runPromise(
+                        `UPDATE recurring_bill_installments SET installment_number = ?, amount = ?, due_date = ? WHERE id = ?`,
+                        [i + 1, inst.amount, inst.dueDate, existingRow.id]
+                    );
+                } else {
+                    await runPromise(
+                        `INSERT INTO recurring_bill_installments (recurring_bill_id, installment_number, amount, due_date) VALUES (?, ?, ?, ?)`,
+                        [expenseId, i + 1, inst.amount, inst.dueDate]
+                    );
+                }
+            }
+
+            // Parcelas que sobraram (lista nova ficou menor): só remove as que não estão pagas.
+            if (existing.length > normalizedInstallments.length) {
+                const toRemove = existing.slice(normalizedInstallments.length).filter(e => e.status !== 'PAID');
+                for (const row of toRemove) {
+                    await runPromise(`DELETE FROM recurring_bill_installments WHERE id = ?`, [row.id]);
+                }
             }
         }
 
