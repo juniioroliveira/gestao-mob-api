@@ -50,26 +50,37 @@ exports.updatePreferences = (req, res) => {
     const userId = req.user.id;
     const { budgetAlerts, billReminders, aiProcessing, weeklySummary, useBiometrics, hideBalances } = req.body;
 
-    const query = `
-        UPDATE members SET 
-            pref_budget_alerts = ?,
-            pref_bill_reminders = ?,
-            pref_ai_processing = ?,
-            pref_weekly_summary = ?,
-            pref_use_biometrics = ?,
-            pref_hide_balances = ?
-        WHERE id = ?
-    `;
+    // Update parcial: só mexe no campo que veio de fato no body. Várias telas
+    // diferentes gerenciam pedaços distintos dessas preferências (notificações,
+    // privacidade...) — se sempre sobrescrevesse tudo, salvar uma tela apagaria o
+    // que a outra tinha configurado.
+    const fieldMap = {
+        budgetAlerts: 'pref_budget_alerts',
+        billReminders: 'pref_bill_reminders',
+        aiProcessing: 'pref_ai_processing',
+        weeklySummary: 'pref_weekly_summary',
+        useBiometrics: 'pref_use_biometrics',
+        hideBalances: 'pref_hide_balances',
+    };
+    const received = { budgetAlerts, billReminders, aiProcessing, weeklySummary, useBiometrics, hideBalances };
 
-    db.run(query, [
-        budgetAlerts ? 1 : 0,
-        billReminders ? 1 : 0,
-        aiProcessing ? 1 : 0,
-        weeklySummary ? 1 : 0,
-        useBiometrics ? 1 : 0,
-        hideBalances ? 1 : 0,
-        userId
-    ], function(err) {
+    const updates = [];
+    const params = [];
+    for (const [key, column] of Object.entries(fieldMap)) {
+        if (received[key] !== undefined) {
+            updates.push(`${column} = ?`);
+            params.push(received[key] ? 1 : 0);
+        }
+    }
+
+    if (updates.length === 0) {
+        return res.status(400).json({ error: 'Nenhuma preferência enviada.' });
+    }
+
+    params.push(userId);
+    const query = `UPDATE members SET ${updates.join(', ')} WHERE id = ?`;
+
+    db.run(query, params, function(err) {
         if (err) {
             console.error('Erro ao atualizar preferências:', err);
             return res.status(500).json({ error: 'Erro interno no servidor' });
