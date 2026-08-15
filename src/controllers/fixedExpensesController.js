@@ -15,12 +15,11 @@ const allPromise = (sql, params) => new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows));
 });
 
-exports.getFixedExpenses = async (req, res) => {
-    const familyId = req.user.family_id;
-    const filterType = req.query.type;
-    const month = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
-    const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
-
+// Núcleo do cálculo de contas a pagar de um mês — extraído de getFixedExpenses pra
+// poder ser reaproveitado por outras telas (ex: o badge da Home) sem duplicar a
+// lógica de atrasados/parcelas/status. Lança em erro em vez de responder HTTP —
+// quem chama decide o que fazer.
+async function computeExpensesForMonth(familyId, month, year, filterType) {
     // Convert filter month/year to a comparable date format (last day of the month) for start/end date checks
     const targetMonthEndStr = `${year}-${String(month).padStart(2, '0')}-${new Date(year, month, 0).getDate()}`;
     const targetMonthStartStr = `${year}-${String(month).padStart(2, '0')}-01`;
@@ -485,10 +484,26 @@ exports.getFixedExpenses = async (req, res) => {
             // Sort expenses again to include invoices in the correct due day order
             expenses.sort((a, b) => a.dueDay - b.dueDay);
 
-            res.json({ expenses });
+            return expenses;
     } catch (err) {
-        console.error('Erro ao buscar contas fixas:', err);
-        return res.status(500).json({ error: 'Erro interno no servidor' });
+        console.error('Erro ao calcular contas fixas do mês:', err);
+        throw err;
+    }
+}
+
+exports.computeExpensesForMonth = computeExpensesForMonth;
+
+exports.getFixedExpenses = async (req, res) => {
+    const familyId = req.user.family_id;
+    const filterType = req.query.type;
+    const month = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
+    const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
+
+    try {
+        const expenses = await computeExpensesForMonth(familyId, month, year, filterType);
+        res.json({ expenses });
+    } catch (err) {
+        res.status(500).json({ error: 'Erro interno no servidor' });
     }
 };
 

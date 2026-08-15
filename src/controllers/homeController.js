@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { isMemberOnline } = require('../websockets/socket');
+const { computeExpensesForMonth } = require('./fixedExpensesController');
 
 const queryPromise = (query, params) => {
     return new Promise((resolve, reject) => {
@@ -196,63 +197,33 @@ exports.getHomeData = async (req, res) => {
             }
         }
 
-        // 7. Total de Contas Fixas Recorrentes (Ativas) com cálculo de rateio personalizado para o usuário atual
-        const recurringBills = await queryPromise(
-            `SELECT id, amount, member_id, due_day, type FROM recurring_bills WHERE family_id = ? AND is_active = 1`,
-            [familyId]
-        );
-
-        // Contas Variáveis no modelo novo (lista de parcelas) deixam recurring_bills.amount
-        // em branco — o valor real mora em cada parcela. Busca tudo de uma vez pra achar,
-        // por conta, a próxima parcela ainda não paga (equivalente ao "amount" de uma FIXED).
-        const variableBillIds = recurringBills.filter(b => b.type === 'VARIABLE').map(b => b.id);
-        const installmentsByBillId = {};
-        if (variableBillIds.length > 0) {
-            const placeholders = variableBillIds.map(() => '?').join(',');
-            const installmentRows = await queryPromise(
-                `SELECT recurring_bill_id, amount, due_date, status FROM recurring_bill_installments
-                 WHERE recurring_bill_id IN (${placeholders}) ORDER BY due_date ASC`,
-                variableBillIds
-            );
-            installmentRows.forEach(row => {
-                if (!installmentsByBillId[row.recurring_bill_id]) installmentsByBillId[row.recurring_bill_id] = [];
-                installmentsByBillId[row.recurring_bill_id].push(row);
-            });
-        }
+        // 7. Total de Contas a Pagar (ainda não pagas) com rateio pro usuário atual.
+        // Reaproveita o MESMO cálculo da tela "Contas a Pagar" (computeExpensesForMonth
+        // — atrasados, parcelas do modelo novo, status por data real) em vez de duplicar
+        // essa lógica aqui. Já tivemos esse total divergindo da tela real por causa disso.
+        const nowForFixed = new Date();
+        const pendingExpenses = (await computeExpensesForMonth(familyId, nowForFixed.getMonth() + 1, nowForFixed.getFullYear()))
+            .filter(e => e.status !== 'Pago' && e.type !== 'CREDIT_INVOICE');
 
         let fixedExpensesTotal = 0;
         let salaryPeriodFixedTotal = 0;
         let advancePeriodFixedTotal = 0;
 
-        for (const bill of recurringBills) {
+        for (const exp of pendingExpenses) {
             try {
-                // Se essa conta variável tem parcelas explícitas, usa o valor (e a data) da
-                // próxima parcela ainda pendente no lugar do amount/due_day da conta em si.
-                let effectiveAmount = bill.amount;
-                let effectiveDueDay = bill.due_day;
-                const installments = installmentsByBillId[bill.id];
-                if (installments && installments.length > 0) {
-                    const nextPending = installments.find(i => i.status !== 'PAID');
-                    if (!nextPending) continue; // todas as parcelas já pagas — nada pendente pra somar
-                    effectiveAmount = nextPending.amount;
-                    effectiveDueDay = new Date(nextPending.due_date).getDate();
-                }
-
-                let billShare = 0;
-                if (bill.member_id) {
+                let share = 0;
+                if (exp.memberId) {
                     let memIds;
-                    if (typeof bill.member_id === 'string' && bill.member_id.startsWith('[')) {
-                        memIds = JSON.parse(bill.member_id);
-                    } else if (Array.isArray(bill.member_id)) {
-                        memIds = bill.member_id;
+                    if (typeof exp.memberId === 'string' && exp.memberId.startsWith('[')) {
+                        memIds = JSON.parse(exp.memberId);
+                    } else if (Array.isArray(exp.memberId)) {
+                        memIds = exp.memberId;
                     } else {
-                        memIds = [parseInt(bill.member_id, 10)];
+                        memIds = [parseInt(exp.memberId, 10)];
                     }
 
-                    if (Array.isArray(memIds)) {
-                        if (memIds.includes(currentUserId)) {
-                            billShare = effectiveAmount / memIds.length;
-                        }
+                    if (Array.isArray(memIds) && memIds.includes(currentUserId)) {
+                        share = exp.amount / memIds.length;
                     }
                 } else {
                     // Sem membro definido: divide igualmente entre todos os membros da família
@@ -261,29 +232,20 @@ exports.getHomeData = async (req, res) => {
                         [familyId]
                     );
                     const count = membersCountRow.count || 1;
-                    billShare = effectiveAmount / count;
+                    share = exp.amount / count;
                 }
 
-                fixedExpensesTotal += billShare;
+                fixedExpensesTotal += share;
 
                 // Distribui no período correto
-                const period = getPeriodForDueDay(effectiveDueDay || 15);
+                const period = getPeriodForDueDay(exp.dueDay || 15);
                 if (period === 'SALARY') {
-                    salaryPeriodFixedTotal += billShare;
+                    salaryPeriodFixedTotal += share;
                 } else {
-                    advancePeriodFixedTotal += billShare;
+                    advancePeriodFixedTotal += share;
                 }
             } catch (e) {
-                // Fallback
-                if (parseInt(bill.member_id, 10) === currentUserId) {
-                    fixedExpensesTotal += bill.amount;
-                    const period = getPeriodForDueDay(bill.due_day || 15);
-                    if (period === 'SALARY') {
-                        salaryPeriodFixedTotal += bill.amount;
-                    } else {
-                        advancePeriodFixedTotal += bill.amount;
-                    }
-                }
+                // Item com dado inesperado — não trava o total inteiro por causa de um só
             }
         }
 
