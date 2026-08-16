@@ -22,7 +22,12 @@ function parseMemberIds(memberIdRaw) {
 
 exports.getStatisticsData = (req, res) => {
     const familyId = req.user.family_id;
-    const currentUserId = req.user.id;
+    // scope=family: mesmo padrão usado em /api/fixed-expenses — telas que comparam
+    // ou somam entre membros (ex: "Controle por Categoria" da Carteira) pedem isso
+    // pra ver o gasto e a renda da família inteira, não só do usuário logado. Sem
+    // o parâmetro, comportamento continua idêntico ao de sempre (só o próprio usuário).
+    const familyScope = req.query.scope === 'family';
+    const currentUserId = familyScope ? null : req.user.id;
 
     // Pega o mês e ano da query string ou usa o atual por padrão
     const reqMonth = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
@@ -103,8 +108,10 @@ exports.getStatisticsData = (req, res) => {
                     // Por usuário: só entra transação em que o usuário logado está entre os
                     // donos — sem member_id definido não existe pra transação (sempre tem um
                     // responsável), mas se for rateada (array com vários ids) ainda aparece
-                    // normalmente pra todo mundo que está nela.
-                    const myTransactionsRows = transactionsRows.filter(t => parseMemberIds(t.member_id).includes(currentUserId));
+                    // normalmente pra todo mundo que está nela. Em scope=family, todo mundo entra.
+                    const myTransactionsRows = familyScope
+                        ? transactionsRows
+                        : transactionsRows.filter(t => parseMemberIds(t.member_id).includes(currentUserId));
 
                     const finalTransactions = myTransactionsRows.map(t => {
                         let memberName = 'Desconhecido';
@@ -141,15 +148,15 @@ exports.getStatisticsData = (req, res) => {
                             spentByCategory[t.category_id] = (spentByCategory[t.category_id] || 0) + amount;
                         }
                     });
-                    // Renda declarada — só a do usuário logado, não a soma da família. O
-                    // limite de cada categoria (em R$) é sempre o percentual salvo aplicado
-                    // sobre ESSA renda, calculado na hora — nunca um valor travado no banco.
-                    const incomeQuery = `
-                        SELECT COALESCE(monthly_income, 0) as totalIncome
-                        FROM members
-                        WHERE family_id = ? AND id = ?
-                    `;
-                    db.get(incomeQuery, [familyId, currentUserId], (err3, incomeRow) => {
+                    // Renda declarada — só a do usuário logado, não a soma da família (a
+                    // menos que seja scope=family, aí soma todo mundo). O limite de cada
+                    // categoria (em R$) é sempre o percentual salvo aplicado sobre ESSA
+                    // renda, calculado na hora — nunca um valor travado no banco.
+                    const incomeQuery = familyScope
+                        ? `SELECT COALESCE(SUM(monthly_income), 0) as totalIncome FROM members WHERE family_id = ?`
+                        : `SELECT COALESCE(monthly_income, 0) as totalIncome FROM members WHERE family_id = ? AND id = ?`;
+                    const incomeParams = familyScope ? [familyId] : [familyId, currentUserId];
+                    db.get(incomeQuery, incomeParams, (err3, incomeRow) => {
                         if (err3) {
                             console.error('Erro ao buscar receitas na estatística:', err3);
                             return res.status(500).json({ error: 'Erro interno no servidor' });
@@ -328,4 +335,121 @@ exports.deleteCategory = (req, res) => {
             });
         });
     });
+};
+
+// Reserva mínima de sobra que a sugestão sempre protege — nunca sugere limites
+// que, somados, deixem a família sem margem nenhuma no fim do mês.
+const SUGGESTION_MINIMUM_SAVINGS_PERCENT = 10;
+
+const suggestionGetQuery = (query, params) => new Promise((resolve, reject) => {
+    db.all(query, params, (err, rows) => err ? reject(err) : resolve(rows));
+});
+const suggestionGetOne = (query, params) => new Promise((resolve, reject) => {
+    db.get(query, params, (err, row) => err ? reject(err) : resolve(row));
+});
+
+// Sugestão de % ao abrir "Editar Categoria" — cálculo direto (sem chamada de IA
+// a cada abertura: instantâneo e sem custo). NÃO é "quanto você já gasta" — isso
+// só validaria um estouro existente. É "quanto dá pra reservar aqui sem
+// comprometer terminar o mês com saldo": renda − contas fixas já pendentes −
+// reserva mínima − % que outras categorias já reservaram = o que sobra pra
+// dividir entre as categorias ainda sem limite, pesado pelo histórico de gasto
+// relativo ENTRE ELAS (quem gasta mais puxa mais fatia desse pool sustentável,
+// mas o pool em si já nasce dentro do que é saudável, não do total gasto hoje).
+exports.getSuggestedCategoryPercent = async (req, res) => {
+    const familyId = req.user.family_id;
+    const categoryId = parseInt(req.params.id, 10);
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+
+    try {
+        const category = await suggestionGetOne(`SELECT id, type FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId]);
+        if (!category) return res.status(404).json({ error: 'Categoria não encontrada' });
+
+        // Só despesa tem sentido de "limite" — receita não tem meta (mesma decisão
+        // já tomada quando tiramos a obrigatoriedade de categoria em lançamento de receita).
+        if (category.type !== 'EXPENSE') {
+            return res.json({ suggestedPercent: 0, reason: 'not_applicable' });
+        }
+
+        const incomeRow = await suggestionGetOne(`SELECT COALESCE(SUM(monthly_income), 0) as totalIncome FROM members WHERE family_id = ?`, [familyId]);
+        const totalIncome = incomeRow.totalIncome || 0;
+        if (totalIncome <= 0) {
+            return res.json({ suggestedPercent: 0, reason: 'no_income' });
+        }
+
+        // Todas as categorias de despesa da família com o % já configurado (ou 0).
+        const allCategories = await suggestionGetQuery(
+            `SELECT c.id, COALESCE(cb.budget_percent, 0) as percent
+             FROM categories c
+             LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.month = ? AND cb.year = ?
+             WHERE c.family_id = ? AND c.type = 'EXPENSE'`,
+            [currentMonth, currentYear, familyId]
+        );
+
+        const alreadySetPercent = allCategories
+            .filter(c => c.id !== categoryId && c.percent > 0)
+            .reduce((s, c) => s + c.percent, 0);
+
+        const unsetCategoryIds = allCategories.filter(c => c.percent <= 0).map(c => c.id);
+        if (!unsetCategoryIds.includes(categoryId)) unsetCategoryIds.push(categoryId);
+
+        // Contas fixas pendentes do mês (compromisso já assumido, família inteira —
+        // mesmo escopo já usado no resto de "Controle por Categoria").
+        const { computeExpensesForMonth } = require('./fixedExpensesController');
+        const fixedExpenses = await computeExpensesForMonth(familyId, currentMonth, currentYear, null, null);
+        const fixedBillsTotal = fixedExpenses.filter(e => e.status !== 'Pago').reduce((s, e) => s + (e.amount || 0), 0);
+        const fixedBillsPercent = (fixedBillsTotal / totalIncome) * 100;
+
+        const availableDiscretionaryPercent = 100 - fixedBillsPercent - SUGGESTION_MINIMUM_SAVINGS_PERCENT;
+        const remainingPoolPercent = Math.max(0, availableDiscretionaryPercent - alreadySetPercent);
+
+        if (remainingPoolPercent <= 0) {
+            // Já não sobra nada saudável pra reservar — contas fixas + o que já foi
+            // configurado nas outras categorias já tomam a renda inteira (ou mais).
+            return res.json({ suggestedPercent: 0, remainingPoolPercent: 0, reason: 'no_room' });
+        }
+
+        // Histórico (últimos 3 meses) só das categorias AINDA sem limite — decide o
+        // peso relativo de cada uma dentro do pool sustentável, não o valor absoluto.
+        const placeholders = unsetCategoryIds.map(() => '?').join(',');
+        const histRows = await suggestionGetQuery(
+            `SELECT t.category_id,
+                    SUM(t.amount) as total,
+                    COUNT(DISTINCT DATE_FORMAT(t.transaction_date, '%Y-%m')) as months
+             FROM transactions t
+             JOIN accounts a ON t.account_id = a.id
+             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND t.category_id IN (${placeholders})
+               AND t.transaction_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01')
+             GROUP BY t.category_id`,
+            [familyId, ...unsetCategoryIds]
+        );
+
+        const avgByCategory = {};
+        histRows.forEach(r => {
+            avgByCategory[r.category_id] = r.months > 0 ? (r.total || 0) / r.months : 0;
+        });
+        const totalUnsetAvgSpend = Object.values(avgByCategory).reduce((s, v) => s + v, 0);
+
+        let suggestedPercent;
+        if (totalUnsetAvgSpend > 0) {
+            const thisAvg = avgByCategory[categoryId] || 0;
+            suggestedPercent = (thisAvg / totalUnsetAvgSpend) * remainingPoolPercent;
+        } else {
+            // Nenhuma das categorias sem limite tem histórico — reparte em partes iguais.
+            suggestedPercent = remainingPoolPercent / unsetCategoryIds.length;
+        }
+
+        suggestedPercent = Math.min(100, Math.max(0, Math.round(suggestedPercent)));
+
+        res.json({
+            suggestedPercent,
+            remainingPoolPercent: Math.round(remainingPoolPercent),
+            reason: 'ok'
+        });
+    } catch (err) {
+        console.error('Erro ao calcular sugestão de % de categoria:', err);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
 };

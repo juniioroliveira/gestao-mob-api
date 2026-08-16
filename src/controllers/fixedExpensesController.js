@@ -440,61 +440,42 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                 WHERE family_id = ? AND is_credit = 1
             `, [familyId]);
 
+            // Mesma fórmula usada em homeController.js pro badge "Contas Fixas a Pagar" —
+            // desloca a transação pro mês da fatura em que ela realmente cai (soma 1 mês se
+            // caiu depois do fechamento; mais 1 se o vencimento é antes do fechamento, cartão
+            // com ciclo "invertido"). A versão antiga daqui (com OR/AND por dia do mês) tinha
+            // um buraco: nunca capturava "mês anterior, dia >= fechamento" no caso comum de
+            // vencimento >= fechamento — por isso faturas como a do PicPay (fecha 15, vence 20)
+            // sumiam da tela mesmo tendo gasto, mas apareciam certas no total da Home (que já
+            // usava essa fórmula certa). Ficando os dois iguais, para de divergir.
+            const targetMonthStr = `${year}-${String(month).padStart(2, '0')}`;
+            // 3 placeholders (closing_day, due_day, closing_day, nessa ordem) pra preencher
+            // toda vez que essa fórmula for usada dentro de uma query.
+            const invoiceMonthShiftSql = `
+                DATE_ADD(
+                    transaction_date,
+                    INTERVAL (
+                        (CASE WHEN DAY(transaction_date) >= COALESCE(?, 31) THEN 1 ELSE 0 END) +
+                        (CASE WHEN COALESCE(?, 1) < COALESCE(?, 31) THEN 1 ELSE 0 END)
+                    ) MONTH
+                )
+            `;
+
             for (const card of creditCards) {
-                // Calculate billing cycle start and end based on requested month/year
-                // For simplicity, we consider transactions where the month/year matches the "fatura" month
-                // Emulating statisticsController logic:
-                // Se fechamento = 15. Transações a partir de 15 do mes M-1 ate 14 do mes M entram na fatura do mes M se due_day > 15
-                // Simplest approach right now to match the "Termometro" is exact same logic as homeController:
-                // We sum where DATE_FORMAT is current, or we use the custom logic:
                 const cardTransactions = await queryPromise(`
                     SELECT SUM(amount) as total_spent
-                    FROM transactions 
+                    FROM transactions
                     WHERE account_id = ? AND type = 'EXPENSE'
-                    AND (
-                        (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31) AND COALESCE(?, 1) >= COALESCE(?, 31))
-                        OR 
-                        (
-                            (
-                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) >= COALESCE(?, 31))
-                                OR 
-                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31))
-                            )
-                            AND COALESCE(?, 1) < COALESCE(?, 31)
-                        )
-                    )
-                `, [
-                    card.id,
-                    month, year, card.closing_day, card.due_day, card.closing_day,
-                    month === 1 ? 12 : month - 1, month === 1 ? year - 1 : year, card.closing_day,
-                    month, year, card.closing_day,
-                    card.due_day, card.closing_day
-                ]);
+                    AND DATE_FORMAT(${invoiceMonthShiftSql}, '%Y-%m') = ?
+                `, [card.id, card.closing_day, card.due_day, card.closing_day, targetMonthStr]);
 
                 // Also subtract INCOME (refunds)
                 const cardIncomes = await queryPromise(`
                     SELECT SUM(amount) as total_refund
-                    FROM transactions 
+                    FROM transactions
                     WHERE account_id = ? AND type = 'INCOME'
-                    AND (
-                        (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31) AND COALESCE(?, 1) >= COALESCE(?, 31))
-                        OR 
-                        (
-                            (
-                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) >= COALESCE(?, 31))
-                                OR 
-                                (MONTH(transaction_date) = ? AND YEAR(transaction_date) = ? AND DAY(transaction_date) < COALESCE(?, 31))
-                            )
-                            AND COALESCE(?, 1) < COALESCE(?, 31)
-                        )
-                    )
-                `, [
-                    card.id,
-                    month, year, card.closing_day, card.due_day, card.closing_day,
-                    month === 1 ? 12 : month - 1, month === 1 ? year - 1 : year, card.closing_day,
-                    month, year, card.closing_day,
-                    card.due_day, card.closing_day
-                ]);
+                    AND DATE_FORMAT(${invoiceMonthShiftSql}, '%Y-%m') = ?
+                `, [card.id, card.closing_day, card.due_day, card.closing_day, targetMonthStr]);
 
                 const spent = (cardTransactions[0].total_spent || 0) - (cardIncomes[0].total_refund || 0);
 
@@ -555,8 +536,14 @@ exports.getFixedExpenses = async (req, res) => {
     const month = req.query.month ? parseInt(req.query.month, 10) : new Date().getMonth() + 1;
     const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
 
+    // scope=family devolve as contas de TODA a família, sem filtrar por dono —
+    // usado por telas que comparam/somam entre membros (ex: Carteira), onde
+    // filtrar pelo usuário logado faria a tela variar dependendo de quem está
+    // vendo, mesmo mostrando dados que deveriam ser os mesmos pra todo mundo.
+    const currentUserId = req.query.scope === 'family' ? null : req.user.id;
+
     try {
-        const expenses = await computeExpensesForMonth(familyId, month, year, filterType, req.user.id);
+        const expenses = await computeExpensesForMonth(familyId, month, year, filterType, currentUserId);
         res.json({ expenses });
     } catch (err) {
         res.status(500).json({ error: 'Erro interno no servidor' });

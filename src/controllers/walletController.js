@@ -1,4 +1,11 @@
 const db = require('../config/database');
+// computeExpensesForMonth é importado dentro de forceUpdateAICache (não aqui no
+// topo) de propósito: fixedExpensesController -> financialEventService ->
+// walletController fecha um ciclo de require. Requerer em cima travava
+// forceUpdateAICache como undefined dentro de financialEventService dependendo
+// da ordem em que os módulos fossem carregados pela primeira vez — mesmo padrão
+// de require tardio já usado nos outros controllers deste projeto pra evitar isso.
+const { getPeriodForDueDay: getPeriodForDueDaySalaryRule } = require('../utils/salaryPeriodHelper');
 
 exports.getWalletData = (req, res) => {
     const familyId = req.user.family_id;
@@ -200,28 +207,51 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
             });
         };
 
+        // Cache por membro, não mais por família só — cada um tem seus próprios dias
+        // de salário/adiantamento e contas, então a resposta da IA é diferente pra
+        // cada um (ver migrations/make_ai_cache_per_member.js).
         await queryPromise(`
             CREATE TABLE IF NOT EXISTS family_ai_cache (
-                family_id INT PRIMARY KEY,
+                family_id INT NOT NULL,
+                member_id INT NOT NULL,
                 cached_response TEXT NOT NULL,
                 last_hash VARCHAR(64) NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (family_id, member_id)
             )
         `, []);
 
-        // 1. Contas e Saldos
-        const accounts = await queryPromise(`SELECT current_balance, type FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`, [familyId]);
-        let totalBalance = 0;
-        accounts.forEach(acc => {
-            if (acc.type !== 'CREDIT') {
-                totalBalance += acc.current_balance;
-            }
-        });
-
-        // 2. Membros e Renda
-        const members = await queryPromise(`SELECT id, name, COALESCE(monthly_income, 0) as total_income FROM members WHERE family_id = ?`, [familyId]);
+        // 1. Membros e Renda (inclui os dias de salário/adiantamento — precisamos deles
+        // já aqui pra saber de quem é o saldo escopado abaixo).
+        const members = await queryPromise(`SELECT id, name, COALESCE(monthly_income, 0) as total_income, salary_day, advance_day, COALESCE(advance_value, 0) as advance_value FROM members WHERE family_id = ?`, [familyId]);
+        const familyMemberCount = members.length || 1;
         let familyTotalIncome = 0;
         members.forEach(m => familyTotalIncome += m.total_income);
+
+        // Membro de referência pro cálculo de "vai fechar no vermelho": o logado, ou
+        // o primeiro da família quando isso roda de um job em background sem sessão.
+        let memberToQuery = loggedInMemberId;
+        if (!memberToQuery && members.length > 0) {
+            memberToQuery = members[0].id;
+        }
+        const referenceMember = members.find(m => m.id === memberToQuery) || null;
+
+        // 2. Contas e Saldos — totalBalance é da família inteira (só contexto geral pra
+        // IA); memberBalance é escopado por dono (conta pessoal só conta pro dono dela,
+        // conta "Casa" divide igualmente pela família) — é ESSE que entra no cálculo de
+        // vermelho/verde, mesmo critério já usado no badge da Home.
+        const accounts = await queryPromise(`SELECT current_balance, type, member_id FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`, [familyId]);
+        let totalBalance = 0;
+        let memberBalance = 0;
+        accounts.forEach(acc => {
+            if (acc.type === 'CREDIT') return;
+            totalBalance += acc.current_balance;
+            if (acc.member_id) {
+                if (acc.member_id === memberToQuery) memberBalance += acc.current_balance;
+            } else {
+                memberBalance += acc.current_balance / familyMemberCount;
+            }
+        });
 
         // 3. Limites de Orçamentos por Categoria
         const budgets = await queryPromise(`
@@ -253,135 +283,108 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
             ) = ?
         `, [familyId, monthStr]);
 
-        // 5. Contas (Fixas e Variáveis)
-        const activeBills = await queryPromise(`SELECT amount, due_day, name, type FROM recurring_bills WHERE family_id = ? AND is_active = 1`, [familyId]);
-        const totalFixedExpenses = activeBills.reduce((sum, item) => sum + (item.amount || 0), 0);
-
-        // 5b. Próximo Recebimento do Membro (usa o admin ou o primeiro se não for passado)
-        let memberToQuery = loggedInMemberId;
-        if (!memberToQuery && members.length > 0) {
-            memberToQuery = members[0].id; // Fallback se chamado do background job sem user logado específico
-        }
-
-        let loggedInMemberRow = [];
-        if (memberToQuery) {
-            loggedInMemberRow = await queryPromise(`
-                SELECT name, monthly_income, salary_day, advance_value, advance_day 
-                FROM members 
-                WHERE id = ?
-            `, [memberToQuery]);
-        }
-
-        let nextPaymentInfo = null;
-        let totalUpcomingBills = 0; 
-        let totalRemainingBillsThisMonth = 0; 
-
+        // 5. Contas a pagar do membro de referência — reaproveita o MESMO cálculo da
+        // tela Contas a Pagar / badge da Home (atrasados, parcelas, status por
+        // transação real), em vez de somar direto recurring_bills.amount (que nem
+        // sabia se a conta já tinha sido paga esse mês). AQUI, diferente do badge da
+        // Home, a fatura de cartão ENTRA na conta — o Termômetro precisa saber de
+        // toda saída de dinheiro real pra dizer se vai fechar no vermelho ou não,
+        // não só das contas fixas "tradicionais".
         const now = new Date();
         const currentDay = now.getDate();
-        const currentMonthNum = now.getMonth() + 1;
-        const currentYearNum = now.getFullYear();
+        const { computeExpensesForMonth } = require('./fixedExpensesController');
+        const pendingBillsForMember = memberToQuery
+            ? (await computeExpensesForMonth(familyId, currentMonth, currentYear, null, memberToQuery))
+                .filter(e => e.status !== 'Pago')
+            : [];
+        const totalFixedExpenses = pendingBillsForMember.reduce((sum, item) => sum + (item.amount || 0), 0);
 
-        if (loggedInMemberRow && loggedInMemberRow.length > 0) {
-            const member = loggedInMemberRow[0];
-            const salaryDay = member.salary_day;
-            const advanceDay = member.advance_day;
+        // 6. Ciclo salário/adiantamento — regra confirmada com o usuário: cada
+        // pagamento cobre do seu próprio dia até o dia anterior ao OUTRO pagamento
+        // (getPeriodForDueDay, compartilhada com a Home). Conta atrasada (isOverdue)
+        // conta como pertencendo ao período ATUAL — é dinheiro devido agora, não numa
+        // data futura de calendário.
+        let nextPaymentInfo = null;
+        let totalUpcomingBills = 0;
+        let totalRemainingBillsThisMonth = 0;
+        // Fallback pra quando o membro não tem os dois dias configurados: sem dá pra
+        // separar por período, então é só saldo do membro menos tudo que resta no mês.
+        let strictProjectedBalance = memberBalance - totalFixedExpenses;
+        let strictIsInTheRed = strictProjectedBalance < 0;
 
-            const candidates = [];
-            if (salaryDay && member.monthly_income > 0) {
-                candidates.push({ type: 'Salário', day: salaryDay, value: member.monthly_income });
-            }
-            if (advanceDay && member.advance_value > 0) {
-                candidates.push({ type: 'Adiantamento', day: advanceDay, value: member.advance_value });
-            }
-            candidates.sort((a, b) => a.day - b.day);
+        if (referenceMember && referenceMember.salary_day && referenceMember.advance_day) {
+            const salaryDay = referenceMember.salary_day;
+            const advanceDay = referenceMember.advance_day;
+            const salaryValue = referenceMember.total_income;
+            const advanceValue = referenceMember.advance_value;
 
-            const futureCandidates = candidates.filter(c => c.day >= currentDay);
+            const currentPeriodType = getPeriodForDueDaySalaryRule(currentDay, salaryDay, advanceDay);
+            const billPeriod = (bill) => bill.isOverdue
+                ? currentPeriodType
+                : getPeriodForDueDaySalaryRule(bill.dueDay, salaryDay, advanceDay);
 
-            let cashflowCycles = [];
-            let currentRunningBalance = totalBalance;
-            let lastProcessedDay = currentDay;
+            const currentPeriodBills = pendingBillsForMember.filter(b => billPeriod(b) === currentPeriodType);
+            const otherPeriodBills = pendingBillsForMember.filter(b => billPeriod(b) !== currentPeriodType);
+            const currentPeriodBillsTotal = currentPeriodBills.reduce((s, b) => s + (b.amount || 0), 0);
+            const otherPeriodBillsTotal = otherPeriodBills.reduce((s, b) => s + (b.amount || 0), 0);
 
-            // Helper to sum bills in range [startDay, endDay]
-            const getBillsInRange = (startDay, endDay) => {
-                let sum = 0;
-                let list = [];
-                activeBills.forEach(bill => {
-                    const d = bill.due_day;
-                    if (d && d >= startDay && d <= endDay) {
-                        sum += (bill.amount || 0);
-                        list.push({ name: bill.name, amount: bill.amount || 0, dueDay: d });
-                    }
-                });
-                return { sum, list };
-            };
+            // Dia/valor/nome do próximo pagamento — é ele que fecha o período atual.
+            // O "adiantamento" é uma PARTE do salário paga antecipada, não uma renda
+            // extra — então quando o próximo pagamento é o salário, o valor que cai de
+            // fato é o total menos o que já foi adiantado nesse ciclo. Sem isso, o
+            // adiantamento entrava contado duas vezes: uma embutido no saldo atual
+            // (assumindo que já foi lançado) e de novo como se fosse dinheiro novo.
+            const nextPayDay = currentPeriodType === 'SALARY' ? advanceDay : salaryDay;
+            const nextPayValue = currentPeriodType === 'SALARY' ? advanceValue : (salaryValue - advanceValue);
+            const nextPayName = currentPeriodType === 'SALARY' ? 'Adiantamento' : 'Salário';
 
-            // Calculate cycles before each future receipt
-            for (let i = 0; i < futureCandidates.length; i++) {
-                let cand = futureCandidates[i];
-                let cycleEndDay = cand.day - 1;
+            const currentPeriodProjectedBalance = memberBalance - currentPeriodBillsTotal;
+            const nextPeriodProjectedBalance = currentPeriodProjectedBalance + nextPayValue - otherPeriodBillsTotal;
 
-                if (cycleEndDay >= lastProcessedDay) {
-                    const bills = getBillsInRange(lastProcessedDay, cycleEndDay);
-                    let finalBalance = currentRunningBalance - bills.sum;
-                    cashflowCycles.push({
-                        name: `Até dia ${cycleEndDay}`,
-                        startDay: lastProcessedDay,
-                        endDay: cycleEndDay,
-                        initialBalance: currentRunningBalance,
-                        income: 0,
-                        incomeName: '',
-                        billsTotal: bills.sum,
-                        billsList: bills.list,
-                        projectedBalance: finalBalance
-                    });
-                    currentRunningBalance = finalBalance;
-                    lastProcessedDay = cand.day;
-                }
-                
-                // Add the income on the candidate day to the running balance
-                // Wait, it's better to just start the next cycle WITH this income
-                // We'll let the next iteration (or the EOM block) handle the period starting with this income
-            }
+            // ESSE é o número que decide "vai fechar no vermelho": cobre só até o
+            // próximo pagamento, com o saldo e as contas de quem está vendo.
+            strictProjectedBalance = currentPeriodProjectedBalance;
+            strictIsInTheRed = strictProjectedBalance < 0;
 
-            // Final cycle (from lastProcessedDay to EOM)
-            const daysInCurrentMonth = new Date(currentYearNum, currentMonthNum, 0).getDate();
-            if (lastProcessedDay <= daysInCurrentMonth) {
-                // Determine incomes that hit exactly on lastProcessedDay or later
-                // Actually, any future candidate that hasn't been consumed as an income in a cycle yet.
-                // It's simpler: for this final cycle, the income is the sum of all futureCandidates that hit on lastProcessedDay.
-                let cycleIncomes = futureCandidates.filter(c => c.day >= lastProcessedDay);
-                let totalIncome = cycleIncomes.reduce((sum, c) => sum + c.value, 0);
-                let incomeNames = cycleIncomes.map(c => c.type).join(' + ');
+            totalUpcomingBills = currentPeriodBillsTotal;
+            totalRemainingBillsThisMonth = currentPeriodBillsTotal;
 
-                const bills = getBillsInRange(lastProcessedDay, daysInCurrentMonth);
-                let finalBalance = currentRunningBalance + totalIncome - bills.sum;
-                
-                cashflowCycles.push({
-                    name: `Fim do Mês (Dia ${lastProcessedDay}-${daysInCurrentMonth})`,
-                    startDay: lastProcessedDay,
-                    endDay: daysInCurrentMonth,
-                    initialBalance: currentRunningBalance,
-                    income: totalIncome,
-                    incomeName: incomeNames,
-                    billsTotal: bills.sum,
-                    billsList: bills.list,
-                    projectedBalance: finalBalance
-                });
-                currentRunningBalance = finalBalance;
-            }
-            
-            // To maintain compatibility with old payload just in case, we can keep totalUpcomingBills 
-            // as the bills of the very first cycle.
-            if (cashflowCycles.length > 0) {
-                totalUpcomingBills = cashflowCycles[0].billsTotal;
-            }
-
-            // Calculate totalRemainingBillsThisMonth for strict calculation
-            totalRemainingBillsThisMonth = getBillsInRange(currentDay, daysInCurrentMonth).sum;
+            const toBillsList = (bills) => bills.map(b => ({ name: b.title, amount: b.amount || 0, dueDay: b.dueDay }));
 
             nextPaymentInfo = {
-                memberName: member.name,
-                cycles: cashflowCycles
+                memberName: referenceMember.name,
+                cycles: [
+                    {
+                        name: `Até o ${nextPayName.toLowerCase()} (dia ${nextPayDay})`,
+                        startDay: currentDay,
+                        endDay: nextPayDay - 1,
+                        initialBalance: memberBalance,
+                        income: 0,
+                        incomeName: '',
+                        billsTotal: currentPeriodBillsTotal,
+                        billsList: toBillsList(currentPeriodBills),
+                        projectedBalance: currentPeriodProjectedBalance
+                    },
+                    {
+                        name: `Depois do ${nextPayName.toLowerCase()}`,
+                        startDay: nextPayDay,
+                        endDay: null,
+                        initialBalance: currentPeriodProjectedBalance,
+                        income: nextPayValue,
+                        incomeName: nextPayName,
+                        billsTotal: otherPeriodBillsTotal,
+                        billsList: toBillsList(otherPeriodBills),
+                        projectedBalance: nextPeriodProjectedBalance
+                    }
+                ]
+            };
+        } else if (referenceMember) {
+            // Só um dos dois dias configurado (ou nenhum) — sem separação por período.
+            totalUpcomingBills = totalFixedExpenses;
+            totalRemainingBillsThisMonth = totalFixedExpenses;
+            nextPaymentInfo = {
+                memberName: referenceMember.name,
+                cycles: []
             };
         }
 
@@ -409,8 +412,8 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
         const daysRemaining = daysInMonth - currentDay + 1;
         const monthProgress = currentDay / daysInMonth;
 
-        const strictProjectedBalance = familyTotalIncome - familyTotalExpenses - totalRemainingBillsThisMonth;
-        const strictIsInTheRed = strictProjectedBalance < 0;
+        // strictProjectedBalance / strictIsInTheRed já foram calculados acima, por
+        // período salário/adiantamento do membro de referência (passo 6).
 
         const cacheInput = JSON.stringify({
             totalBalance,
@@ -427,9 +430,9 @@ exports.forceUpdateAICache = async (familyId, loggedInMemberId = null) => {
         const dataHash = crypto.createHash('sha256').update(cacheInput).digest('hex');
 
         // Verifica cache e retorna se já existe (para quando é chamado de background e nada mudou de verdade)
-        const cached = await queryPromise(`SELECT cached_response, last_hash FROM family_ai_cache WHERE family_id = ?`, [familyId]);
+        const cached = await queryPromise(`SELECT cached_response, last_hash FROM family_ai_cache WHERE family_id = ? AND member_id = ?`, [familyId, memberToQuery]);
         if (cached && cached.length > 0 && cached[0].last_hash === dataHash) {
-            console.log(`⚡ Retornando análise do Termômetro do cache (Background check) para a família ${familyId}`);
+            console.log(`⚡ Retornando análise do Termômetro do cache (Background check) para a família ${familyId}, membro ${memberToQuery}`);
             return JSON.parse(cached[0].cached_response);
         }
 
@@ -542,11 +545,11 @@ ${JSON.stringify(transactions.slice(0, 15).map(t => ({ desc: t.description, val:
 
         try {
             if (cached && cached.length > 0) {
-                await queryPromise(`UPDATE family_ai_cache SET cached_response = ?, last_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE family_id = ?`, [finalResponseJsonStr, dataHash, familyId]);
+                await queryPromise(`UPDATE family_ai_cache SET cached_response = ?, last_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE family_id = ? AND member_id = ?`, [finalResponseJsonStr, dataHash, familyId, memberToQuery]);
             } else {
-                await queryPromise(`INSERT INTO family_ai_cache (family_id, cached_response, last_hash) VALUES (?, ?, ?)`, [familyId, finalResponseJsonStr, dataHash]);
+                await queryPromise(`INSERT INTO family_ai_cache (family_id, member_id, cached_response, last_hash) VALUES (?, ?, ?, ?)`, [familyId, memberToQuery, finalResponseJsonStr, dataHash]);
             }
-            console.log(`💾 Cache da análise atualizado para a família ${familyId}`);
+            console.log(`💾 Cache da análise atualizada para a família ${familyId}, membro ${memberToQuery}`);
         } catch (cacheWriteErr) {
             console.error('❌ Erro ao salvar cache no banco de dados:', cacheWriteErr);
         }
@@ -572,8 +575,8 @@ exports.getThermometerAIData = async (req, res) => {
             });
         };
 
-        const cached = await queryPromise(`SELECT cached_response FROM family_ai_cache WHERE family_id = ?`, [familyId]);
-        
+        const cached = await queryPromise(`SELECT cached_response FROM family_ai_cache WHERE family_id = ? AND member_id = ?`, [familyId, req.user.id]);
+
         if (cached && cached.length > 0) {
             // Serve instantaneamente
             const payload = JSON.parse(cached[0].cached_response);

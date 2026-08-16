@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const { isMemberOnline } = require('../websockets/socket');
 const { computeExpensesForMonth } = require('./fixedExpensesController');
+const { getPeriodForDueDay: getPeriodForDueDaySalaryRule } = require('../utils/salaryPeriodHelper');
 
 const queryPromise = (query, params) => {
     return new Promise((resolve, reject) => {
@@ -215,21 +216,10 @@ exports.getHomeData = async (req, res) => {
         const salaryDay = currentUser.salary_day || 5;
         const advanceDay = currentUser.advance_day || 20;
 
-        // Função auxiliar para identificar o período do vencimento da conta
+        // Função auxiliar pra identificar o período do vencimento da conta — regra
+        // compartilhada com o Termômetro Financeiro (src/utils/salaryPeriodHelper.js).
         function getPeriodForDueDay(dueDay) {
-            if (salaryDay < advanceDay) {
-                if (dueDay >= salaryDay && dueDay < advanceDay) {
-                    return 'SALARY';
-                } else {
-                    return 'ADVANCE';
-                }
-            } else {
-                if (dueDay >= advanceDay && dueDay < salaryDay) {
-                    return 'ADVANCE';
-                } else {
-                    return 'SALARY';
-                }
-            }
+            return getPeriodForDueDaySalaryRule(dueDay, salaryDay, advanceDay);
         }
 
         // 7. Total de Contas a Pagar (ainda não pagas) com rateio pro usuário atual.
@@ -354,13 +344,20 @@ exports.getHomeData = async (req, res) => {
             }
         }
 
+        // Contas/cartões pessoais (member_id de outro membro) não aparecem na listagem
+        // pra quem não é o dono — nem pra admin. Só conta "Casa" (member_id null) ou a
+        // do próprio usuário logado. Isso só filtra o que é EXIBIDO/SELECIONÁVEL; os
+        // totais acima (totalBalance, creditCardDebt, totalInvestments) continuam
+        // somando com base em `accounts` (sem filtro), do jeito que já funcionava.
+        const visibleAccounts = accounts.filter(acc => acc.member_id === null || acc.member_id === currentUserId);
+
         res.status(200).json({
             user: currentUser,
             familyName: familyInfo ? familyInfo.name : 'Minha Família',
             totalBalance,
             totalInvestments,
             creditCardDebt,
-            accounts,
+            accounts: visibleAccounts,
             income,
             expense,
             cashExpenses,

@@ -121,8 +121,10 @@ exports.createTransaction = async (req, res) => {
                     else resolve(rows);
                 });
             });
+            // IA só deve sugerir contas visíveis pra quem está lançando: a dele ou
+            // compartilhada — nunca a conta pessoal de outro membro da família.
             const accounts = await new Promise((resolve, reject) => {
-                db.all(`SELECT id, name FROM accounts WHERE family_id = ?`, [familyId], (err, rows) => {
+                db.all(`SELECT id, name FROM accounts WHERE family_id = ? AND (member_id IS NULL OR member_id = ?)`, [familyId, req.user.id], (err, rows) => {
                     if (err) reject(err);
                     else resolve(rows);
                 });
@@ -145,7 +147,7 @@ exports.createTransaction = async (req, res) => {
                 if (enriched[0].aiShouldCreateAccount && enriched[0].aiNewAccountName) {
                     const getOrCreateAccount = async (name) => {
                         const row = await new Promise((resolve, reject) => {
-                            db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ?`, [familyId, name.toLowerCase()], (err, row) => {
+                            db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ? AND (member_id IS NULL OR member_id = ?)`, [familyId, name.toLowerCase(), req.user.id], (err, row) => {
                                 if (err) reject(err);
                                 else resolve(row);
                             });
@@ -181,8 +183,12 @@ exports.createTransaction = async (req, res) => {
         return res.status(400).json({ error: 'Campos obrigatórios ausentes' });
     }
 
-    if (type !== 'TRANSFER' && !categoryId) {
-        return res.status(400).json({ error: 'Categoria é obrigatória para despesas e receitas' });
+    // Categoria só é obrigatória pra despesa — receita não tem meta/orçamento
+    // associado, então não faz sentido forçar o usuário a escolher uma; o
+    // lançamento existe só pra contabilizar a entrada, não pra ser controlado
+    // por categoria como as saídas são.
+    if (type === 'EXPENSE' && !categoryId) {
+        return res.status(400).json({ error: 'Categoria é obrigatória para despesas' });
     }
 
     if (type === 'TRANSFER' && (!destinationAccountId || accountId === destinationAccountId)) {
@@ -232,9 +238,11 @@ exports.createTransaction = async (req, res) => {
             `;
             const result = await runQuery(insertQuery, [
                 accountId, 
-                type === 'TRANSFER' ? destinationAccountId : null, 
-                JSON.stringify(req.body.memberId), 
-                type === 'TRANSFER' ? null : categoryId, 
+                type === 'TRANSFER' ? destinationAccountId : null,
+                JSON.stringify(req.body.memberId),
+                // Receita não obriga categoria mais — sem o "|| null" aqui, um categoryId
+                // omitido chega como `undefined` e o driver do MySQL rejeita o bind.
+                type === 'TRANSFER' ? null : (categoryId || null),
                 installmentAmount, 
                 type, 
                 desc, 
@@ -291,8 +299,12 @@ exports.updateTransaction = async (req, res) => {
         return res.status(400).json({ error: 'Campos obrigatórios ausentes' });
     }
 
-    if (type !== 'TRANSFER' && !categoryId) {
-        return res.status(400).json({ error: 'Categoria é obrigatória para despesas e receitas' });
+    // Categoria só é obrigatória pra despesa — receita não tem meta/orçamento
+    // associado, então não faz sentido forçar o usuário a escolher uma; o
+    // lançamento existe só pra contabilizar a entrada, não pra ser controlado
+    // por categoria como as saídas são.
+    if (type === 'EXPENSE' && !categoryId) {
+        return res.status(400).json({ error: 'Categoria é obrigatória para despesas' });
     }
 
     if (type === 'TRANSFER' && (!destinationAccountId || accountId === destinationAccountId)) {
@@ -334,9 +346,9 @@ exports.updateTransaction = async (req, res) => {
         `;
         await runQuery(updateQuery, [
             accountId, 
-            type === 'TRANSFER' ? destinationAccountId : null, 
+            type === 'TRANSFER' ? destinationAccountId : null,
             JSON.stringify(req.body.memberId),
-            type === 'TRANSFER' ? null : categoryId, 
+            type === 'TRANSFER' ? null : (categoryId || null),
             amount, 
             type, 
             description, 
@@ -547,9 +559,10 @@ exports.importOFX = async (req, res) => {
                     });
                 });
 
-                // Obter contas da família
+                // Obter contas da família — só as visíveis pra quem está importando
+                // (a dele ou compartilhada), mesmo critério do fluxo de notificação.
                 const accounts = await new Promise((resolve, reject) => {
-                    db.all(`SELECT id, name FROM accounts WHERE family_id = ?`, [familyId], (err, rows) => {
+                    db.all(`SELECT id, name FROM accounts WHERE family_id = ? AND (member_id IS NULL OR member_id = ?)`, [familyId, req.user.id], (err, rows) => {
                         if (err) reject(err);
                         else resolve(rows);
                     });
@@ -581,7 +594,7 @@ exports.importOFX = async (req, res) => {
 
                 const getOrCreateAccount = async (name) => {
                     const row = await new Promise((resolve, reject) => {
-                        db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ?`, [familyId, name.toLowerCase()], (err, row) => {
+                        db.get(`SELECT id FROM accounts WHERE family_id = ? AND LOWER(name) = ? AND (member_id IS NULL OR member_id = ?)`, [familyId, name.toLowerCase(), req.user.id], (err, row) => {
                             if (err) reject(err);
                             else resolve(row);
                         });
