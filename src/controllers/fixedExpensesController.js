@@ -368,14 +368,29 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                 const currentExp = getBaseExpenseObj();
                 let status = 'Pendente';
                 let statusColor = '#2196F3'; // Azul
-                
+
+                // Toda ocorrência carrega a competência que representa — não só as
+                // geradas pelo loop de "atrasados" (seção 1). Sem isso, vincular uma
+                // transação a partir do card do mês corrente (navegando direto pra ele,
+                // em vez de vê-lo como "atrasado" resumido num mês futuro) não tinha como
+                // informar o backend qual mês estava sendo fechado, e o card não fechava
+                // se a transação escolhida tivesse data de outro mês (comum: usuário paga
+                // atrasado só quando cai o próximo salário, já no mês seguinte).
+                const currentMonthStr = `${year}-${String(month).padStart(2, '0')}`;
+                currentExp.referenceMonth = currentMonthStr;
+
                 // Compare using actual dates
                 const today = new Date();
                 // Set hours to 0 for fair date comparison
                 today.setHours(0,0,0,0);
                 const dueFullDate = new Date(year, month - 1, row.due_day);
-                
-                if (row.is_paid_this_month > 0) {
+
+                // "Pago" tanto por transação vinculada com data no mês exato quanto por
+                // fechamento manual da competência (bill_manual_payments) — mesmo critério
+                // usado pelas ocorrências atrasadas históricas (paidMap).
+                const isPaidViaManualClose = Boolean(paidMap[row.id] && paidMap[row.id].has(currentMonthStr));
+
+                if (row.is_paid_this_month > 0 || isPaidViaManualClose) {
                     status = 'Pago';
                     statusColor = '#4CAF50'; // Verde
                     // Mostra o valor realmente pago (soma das transações vinculadas nesse mês),
