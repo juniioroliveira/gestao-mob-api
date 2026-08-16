@@ -45,16 +45,21 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
         SELECT rb.id, rb.name, rb.amount, rb.due_day, rb.is_active, rb.category_id, rb.member_id, rb.account_id, rb.payment_type,
                rb.type, rb.total_installments, rb.current_installment, rb.start_date, rb.end_date, rb.created_at,
                c.name as category_name, c.color_hex as category_color,
-               (SELECT COUNT(*) FROM transactions t 
-                WHERE t.recurring_bill_id = rb.id 
+               (SELECT COUNT(*) FROM transactions t
+                WHERE t.recurring_bill_id = rb.id
                 AND MONTH(t.transaction_date) = ?
                 AND YEAR(t.transaction_date) = ?
-               ) as is_paid_this_month
+               ) as is_paid_this_month,
+               (SELECT SUM(t.amount) FROM transactions t
+                WHERE t.recurring_bill_id = rb.id
+                AND MONTH(t.transaction_date) = ?
+                AND YEAR(t.transaction_date) = ?
+               ) as paid_amount_this_month
         FROM recurring_bills rb
         JOIN categories c ON rb.category_id = c.id
         WHERE rb.family_id = ?
     `;
-    const params = [month, year, familyId];
+    const params = [month, year, month, year, familyId];
 
     if (filterType) {
         query += ` AND rb.type = ?`;
@@ -373,6 +378,14 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                 if (row.is_paid_this_month > 0) {
                     status = 'Pago';
                     statusColor = '#4CAF50'; // Verde
+                    // Mostra o valor realmente pago (soma das transações vinculadas nesse mês),
+                    // não o valor padrão configurado na conta — mensalidades como convênio
+                    // variam mês a mês, e o valor da transação é a fonte da verdade.
+                    // Isso não altera rb.amount, só a exibição desse mês específico.
+                    if (row.paid_amount_this_month != null) {
+                        currentExp.amount = row.paid_amount_this_month;
+                        currentExp.rawAmount = row.paid_amount_this_month;
+                    }
                 } else if (dueFullDate < today) {
                     status = 'Atrasado';
                     statusColor = '#F44336'; // Vermelho
