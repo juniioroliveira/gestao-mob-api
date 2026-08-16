@@ -885,7 +885,7 @@ exports.getUnlinkedTransactions = (req, res) => {
 
 exports.linkTransaction = (req, res) => {
     const familyId = req.user.family_id;
-    const { transactionId, recurringBillId, installmentId } = req.body;
+    const { transactionId, recurringBillId, installmentId, referenceMonth } = req.body;
 
     if (!transactionId || !recurringBillId) {
         return res.status(400).json({ error: 'transactionId e recurringBillId são obrigatórios' });
@@ -919,6 +919,28 @@ exports.linkTransaction = (req, res) => {
                 return res.status(500).json({ error: 'Erro ao vincular pagamento' });
             }
 
+            // Se o vínculo é pra uma ocorrência atrasada (referenceMonth), a transação
+            // escolhida quase nunca cai no mês de referência dessa ocorrência — o usuário
+            // geralmente paga uma conta de julho com uma transação lançada em agosto.
+            // O cálculo de "atrasado" (paidMap) casa por mês da transação, então sem isso
+            // a conta continuava aparecendo como pendente mesmo após vincular. Gravamos
+            // também em bill_manual_payments pra fechar esse mês específico, igual ao
+            // fluxo de "Marcar como Pago (Sem Lançamento)".
+            const proceed = () => continueLinking();
+            if (referenceMonth && /^\d{4}-\d{2}$/.test(referenceMonth)) {
+                db.run(
+                    `INSERT IGNORE INTO bill_manual_payments (family_id, recurring_bill_id, reference_month) VALUES (?, ?, ?)`,
+                    [familyId, recurringBillId, referenceMonth],
+                    function(errManual) {
+                        if (errManual) console.error('Erro ao registrar pagamento manual do mês de referência:', errManual);
+                        proceed();
+                    }
+                );
+            } else {
+                proceed();
+            }
+
+            function continueLinking() {
             // Modelo novo (parcela explícita): marca a parcela específica como paga e
             // vinculada a essa transação. Não mexe em current_installment/is_active —
             // isso é coisa do modelo antigo (mensal, sem lista de parcelas).
@@ -971,6 +993,7 @@ exports.linkTransaction = (req, res) => {
                 }
                 triggerUpdate(familyId);
                 res.json({ message: 'Pagamento vinculado com sucesso!' });
+            }
             }
         });
     });
