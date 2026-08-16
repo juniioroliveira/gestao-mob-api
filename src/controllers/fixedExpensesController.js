@@ -346,8 +346,12 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
             }
 
             // 2. GENERATE CURRENT MONTH BILL (if it falls within active range)
-            let isCurrentValid = true;
-            if (row.type === 'VARIABLE' && row.start_date && row.total_installments) {
+            // Se o mês navegado é anterior a quando a conta começou (start_date, ou
+            // created_at quando start_date não foi informado), ela nem existia ainda —
+            // não gera ocorrência nenhuma. Sem isso, uma conta FIXED criada em agosto
+            // aparecia como "Atrasado" ao navegar pra julho, mês em que ela nem existia.
+            let isCurrentValid = !((year < startYear) || (year === startYear && month < startMonth));
+            if (isCurrentValid && row.type === 'VARIABLE' && row.start_date && row.total_installments) {
                 const startDate = new Date(row.start_date);
                 const diffMonths = (year - startDate.getFullYear()) * 12 + (month - (startDate.getMonth() + 1));
                 if (diffMonths >= row.total_installments || diffMonths < 0) {
