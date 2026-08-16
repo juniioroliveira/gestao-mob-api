@@ -337,9 +337,32 @@ exports.deleteCategory = (req, res) => {
     });
 };
 
-// Reserva mínima de sobra que a sugestão sempre protege — nunca sugere limites
-// que, somados, deixem a família sem margem nenhuma no fim do mês.
-const SUGGESTION_MINIMUM_SAVINGS_PERCENT = 10;
+// Guia 50/30/20 adaptado: até 50% da renda pra NECESSIDADES, até 30% pra
+// ESTILO DE VIDA, sempre reservando os 20% restantes de sobra. Classifica a
+// categoria pelo NOME (heurística — não tem campo de "essencial" no cadastro).
+// Chuta em "wants" por padrão quando não reconhece a palavra, de propósito:
+// melhor pecar por sugerir pouco numa categoria que devia ser prioridade do
+// que dar 50% de folga a algo que não é necessidade de verdade.
+const NEEDS_GROUP_CAP_PERCENT = 50;
+const WANTS_GROUP_CAP_PERCENT = 30;
+const NEEDS_KEYWORDS = [
+    'essencial', 'necess', 'moradia', 'aluguel', 'financiamento',
+    'saude', 'saúde', 'medic', 'médic', 'farmac', 'convenio', 'convênio', 'seguro',
+    'mercado', 'supermercado', 'alimenta',
+    'transporte', 'combustivel', 'combustível',
+    'educa', 'escola', 'faculdade',
+    'agua', 'água', 'luz', 'energia', 'internet', 'telefone', 'condominio', 'condomínio',
+];
+
+function classifyCategoryGroup(name) {
+    const normalized = (name || '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    const isNeed = NEEDS_KEYWORDS.some(kw => normalized.includes(
+        kw.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    ));
+    return isNeed ? 'NEEDS' : 'WANTS';
+}
 
 const suggestionGetQuery = (query, params) => new Promise((resolve, reject) => {
     db.all(query, params, (err, rows) => err ? reject(err) : resolve(rows));
@@ -349,13 +372,16 @@ const suggestionGetOne = (query, params) => new Promise((resolve, reject) => {
 });
 
 // Sugestão de % ao abrir "Editar Categoria" — cálculo direto (sem chamada de IA
-// a cada abertura: instantâneo e sem custo). NÃO é "quanto você já gasta" — isso
-// só validaria um estouro existente. É "quanto dá pra reservar aqui sem
-// comprometer terminar o mês com saldo": renda − contas fixas já pendentes −
-// reserva mínima − % que outras categorias já reservaram = o que sobra pra
-// dividir entre as categorias ainda sem limite, pesado pelo histórico de gasto
-// relativo ENTRE ELAS (quem gasta mais puxa mais fatia desse pool sustentável,
-// mas o pool em si já nasce dentro do que é saudável, não do total gasto hoje).
+// a cada abertura: instantâneo e sem custo, mas orientado por regra de bolso
+// padrão, não por "quanto você já gasta" — já testamos isso e só validava o
+// estouro de categorias mal categorizadas tipo "Outros" absorvendo PIX solto).
+//
+// Regra: cada categoria entra num grupo (NECESSIDADES até 50% da renda, ESTILO
+// DE VIDA até 30%), e dentro do grupo o teto é dividido entre as categorias
+// ainda sem limite — MAS nunca abaixo do que essa categoria específica já tem
+// de conta fixa comprometida (senão a sugestão seria impossível de cumprir:
+// de nada adianta sugerir 10% pra uma categoria que já tem 26% em parcela de
+// empréstimo vinculada a ela).
 exports.getSuggestedCategoryPercent = async (req, res) => {
     const familyId = req.user.family_id;
     const categoryId = parseInt(req.params.id, 10);
@@ -364,7 +390,7 @@ exports.getSuggestedCategoryPercent = async (req, res) => {
     const currentYear = now.getFullYear();
 
     try {
-        const category = await suggestionGetOne(`SELECT id, type FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId]);
+        const category = await suggestionGetOne(`SELECT id, name, type FROM categories WHERE id = ? AND family_id = ?`, [categoryId, familyId]);
         if (!category) return res.status(404).json({ error: 'Categoria não encontrada' });
 
         // Só despesa tem sentido de "limite" — receita não tem meta (mesma decisão
@@ -379,75 +405,61 @@ exports.getSuggestedCategoryPercent = async (req, res) => {
             return res.json({ suggestedPercent: 0, reason: 'no_income' });
         }
 
-        // Todas as categorias de despesa da família com o % já configurado (ou 0).
-        const allCategories = await suggestionGetQuery(
-            `SELECT c.id, COALESCE(cb.budget_percent, 0) as percent
+        // Todas as categorias de despesa da família, com % já configurado e grupo.
+        const allCategoriesRaw = await suggestionGetQuery(
+            `SELECT c.id, c.name, COALESCE(cb.budget_percent, 0) as percent
              FROM categories c
              LEFT JOIN category_budgets cb ON cb.category_id = c.id AND cb.month = ? AND cb.year = ?
              WHERE c.family_id = ? AND c.type = 'EXPENSE'`,
             [currentMonth, currentYear, familyId]
         );
+        const allCategories = allCategoriesRaw.map(c => ({ ...c, group: classifyCategoryGroup(c.name) }));
 
-        const alreadySetPercent = allCategories
-            .filter(c => c.id !== categoryId && c.percent > 0)
-            .reduce((s, c) => s + c.percent, 0);
-
-        const unsetCategoryIds = allCategories.filter(c => c.percent <= 0).map(c => c.id);
-        if (!unsetCategoryIds.includes(categoryId)) unsetCategoryIds.push(categoryId);
-
-        // Contas fixas pendentes do mês (compromisso já assumido, família inteira —
-        // mesmo escopo já usado no resto de "Controle por Categoria").
+        // Contas fixas pendentes do mês, por categoria — o "piso" que cada uma já
+        // tem comprometido, não importa o grupo/teto (família inteira, mesmo
+        // escopo já usado no resto de "Controle por Categoria").
         const { computeExpensesForMonth } = require('./fixedExpensesController');
         const fixedExpenses = await computeExpensesForMonth(familyId, currentMonth, currentYear, null, null);
-        const fixedBillsTotal = fixedExpenses.filter(e => e.status !== 'Pago').reduce((s, e) => s + (e.amount || 0), 0);
-        const fixedBillsPercent = (fixedBillsTotal / totalIncome) * 100;
+        const fixedByCategory = {};
+        fixedExpenses
+            .filter(e => e.status !== 'Pago' && e.categoryId)
+            .forEach(e => {
+                fixedByCategory[e.categoryId] = (fixedByCategory[e.categoryId] || 0) + (e.amount || 0);
+            });
+        const floorPercentOf = (catId) => ((fixedByCategory[catId] || 0) / totalIncome) * 100;
 
-        const availableDiscretionaryPercent = 100 - fixedBillsPercent - SUGGESTION_MINIMUM_SAVINGS_PERCENT;
-        const remainingPoolPercent = Math.max(0, availableDiscretionaryPercent - alreadySetPercent);
+        let suggestedPercent = 0;
+        let reason = 'ok';
 
-        if (remainingPoolPercent <= 0) {
-            // Já não sobra nada saudável pra reservar — contas fixas + o que já foi
-            // configurado nas outras categorias já tomam a renda inteira (ou mais).
-            return res.json({ suggestedPercent: 0, remainingPoolPercent: 0, reason: 'no_room' });
-        }
+        for (const groupName of ['NEEDS', 'WANTS']) {
+            const groupCategories = allCategories.filter(c => c.group === groupName);
+            if (!groupCategories.some(c => c.id === categoryId)) continue; // a categoria pedida não é desse grupo
 
-        // Histórico (últimos 3 meses) só das categorias AINDA sem limite — decide o
-        // peso relativo de cada uma dentro do pool sustentável, não o valor absoluto.
-        const placeholders = unsetCategoryIds.map(() => '?').join(',');
-        const histRows = await suggestionGetQuery(
-            `SELECT t.category_id,
-                    SUM(t.amount) as total,
-                    COUNT(DISTINCT DATE_FORMAT(t.transaction_date, '%Y-%m')) as months
-             FROM transactions t
-             JOIN accounts a ON t.account_id = a.id
-             WHERE a.family_id = ? AND t.type = 'EXPENSE' AND t.category_id IN (${placeholders})
-               AND t.transaction_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01')
-             GROUP BY t.category_id`,
-            [familyId, ...unsetCategoryIds]
-        );
+            const groupCap = groupName === 'NEEDS' ? NEEDS_GROUP_CAP_PERCENT : WANTS_GROUP_CAP_PERCENT;
+            const alreadySetInGroup = groupCategories.filter(c => c.percent > 0).reduce((s, c) => s + c.percent, 0);
+            const unsetInGroup = groupCategories.filter(c => c.percent <= 0);
+            const groupRemaining = Math.max(0, groupCap - alreadySetInGroup);
 
-        const avgByCategory = {};
-        histRows.forEach(r => {
-            avgByCategory[r.category_id] = r.months > 0 ? (r.total || 0) / r.months : 0;
-        });
-        const totalUnsetAvgSpend = Object.values(avgByCategory).reduce((s, v) => s + v, 0);
+            const floorsSum = unsetInGroup.reduce((s, c) => s + floorPercentOf(c.id), 0);
+            const myFloor = floorPercentOf(categoryId);
 
-        let suggestedPercent;
-        if (totalUnsetAvgSpend > 0) {
-            const thisAvg = avgByCategory[categoryId] || 0;
-            suggestedPercent = (thisAvg / totalUnsetAvgSpend) * remainingPoolPercent;
-        } else {
-            // Nenhuma das categorias sem limite tem histórico — reparte em partes iguais.
-            suggestedPercent = remainingPoolPercent / unsetCategoryIds.length;
+            if (floorsSum >= groupRemaining) {
+                // Só os compromissos já assumidos no grupo já tomam (ou estouram) o teto
+                // saudável — a sugestão vira só o piso de cada uma, sem folga extra.
+                suggestedPercent = myFloor;
+                reason = floorsSum > groupRemaining ? 'floor_exceeds_group_cap' : 'ok';
+            } else {
+                // Sobra folga além dos pisos — divide o excedente em partes iguais entre
+                // as categorias sem limite do grupo, por cima do piso de cada uma.
+                const extra = groupRemaining - floorsSum;
+                suggestedPercent = myFloor + (extra / unsetInGroup.length);
+            }
+            break;
         }
 
         suggestedPercent = Math.min(100, Math.max(0, Math.round(suggestedPercent)));
 
-        res.json({
-            suggestedPercent,
-            remainingPoolPercent: Math.round(remainingPoolPercent),
-            reason: 'ok'
-        });
+        res.json({ suggestedPercent, reason });
     } catch (err) {
         console.error('Erro ao calcular sugestão de % de categoria:', err);
         res.status(500).json({ error: 'Erro interno no servidor' });
