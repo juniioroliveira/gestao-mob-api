@@ -138,18 +138,41 @@ exports.getHomeData = async (req, res) => {
         }));
 
         // 4. Últimas Transações
-        const rawRecentTransactions = await queryPromise(
-            `SELECT t.id, t.amount, t.type, t.description, t.transaction_date, 
+        // Escopo por membro: antes trazia as 4 mais recentes de TODA a família,
+        // então ao ver o perfil de quem mal usa o app (ex: cônjuge), a lista vinha
+        // cheia de lançamentos de outra pessoa — parecia (por engano) ser o extrato
+        // dela. Busca mais linhas do que precisa e filtra em JS pra quem é dono da
+        // transação (t.member_id inclui o usuário) ou da conta usada (a.member_id).
+        const rawRecentTransactionsPool = await queryPromise(
+            `SELECT t.id, t.amount, t.type, t.description, t.transaction_date,
                     t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type, t.recurring_bill_id,
-                    a.name as account_name, 
-                    c.name as category_name, c.icon, c.color_hex 
-             FROM transactions t 
-             JOIN accounts a ON t.account_id = a.id 
-             LEFT JOIN categories c ON t.category_id = c.id 
-             WHERE a.family_id = ? 
-             ORDER BY t.transaction_date DESC, t.id DESC LIMIT 4`,
+                    a.name as account_name, a.member_id as account_member_id,
+                    c.name as category_name, c.icon, c.color_hex
+             FROM transactions t
+             JOIN accounts a ON t.account_id = a.id
+             LEFT JOIN categories c ON t.category_id = c.id
+             WHERE a.family_id = ?
+             ORDER BY t.transaction_date DESC, t.id DESC LIMIT 50`,
             [familyId]
         );
+
+        const belongsToCurrentUser = (t) => {
+            try {
+                const memIds = JSON.parse(t.member_id);
+                if (Array.isArray(memIds)) {
+                    if (memIds.includes(currentUserId)) return true;
+                } else if (memIds === currentUserId) {
+                    return true;
+                }
+            } catch (e) {
+                if (t.member_id === currentUserId) return true;
+            }
+            // Conta pessoal do próprio usuário (ex: cartão dela) — mesmo sem
+            // t.member_id apontar pra ela, a transação é dela por dono da conta.
+            return t.account_member_id === currentUserId;
+        };
+
+        const rawRecentTransactions = rawRecentTransactionsPool.filter(belongsToCurrentUser).slice(0, 4);
 
         // Mapear os membros para as transações (suportando array de IDs)
         const recentTransactions = rawRecentTransactions.map(t => {
