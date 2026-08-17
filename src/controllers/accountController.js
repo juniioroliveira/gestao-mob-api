@@ -68,17 +68,27 @@ exports.updateAccount = (req, res) => {
 
     const isDebitVal = (isDebit === undefined) ? 1 : (isDebit ? 1 : 0);
     const isCreditVal = (isCredit === undefined) ? 0 : (isCredit ? 1 : 0);
-    const creditLimitVal = creditLimit || 0;
     const memberId = resolveMemberIdFromBody(req);
 
-    db.get(`SELECT id FROM accounts WHERE id = ? AND family_id = ?`, [accountId, familyId], (err, row) => {
+    // Fechamento/vencimento/limite só fazem sentido pra cartão de crédito, então o app
+    // não manda essas chaves quando isCredit vem false (ex: usuário trocou o Tipo de
+    // Conta pra "Conta Pessoal"). Sem esse hasOwnProperty, um UPDATE que não mandou a
+    // chave zerava esses campos no banco — e ao voltar pra "Cartão de Crédito" depois,
+    // a fatura sumia de vez porque closing_day/due_day tinham virado NULL. Preserva o
+    // valor já salvo sempre que a chave não vier no body; só sobrescreve quando vier.
+    db.get(`SELECT id, closing_day, due_day, credit_limit FROM accounts WHERE id = ? AND family_id = ?`, [accountId, familyId], (err, row) => {
         if (err || !row) {
             return res.status(404).json({ error: 'Conta não encontrada ou sem permissão' });
         }
 
+        const hasKey = (k) => Object.prototype.hasOwnProperty.call(req.body, k);
+        const closingDayVal = hasKey('closingDay') ? (closingDay || null) : row.closing_day;
+        const dueDayVal = hasKey('dueDay') ? (dueDay || null) : row.due_day;
+        const creditLimitVal = hasKey('creditLimit') ? (creditLimit || 0) : row.credit_limit;
+
         const updateWithMember = (validatedMemberId) => {
             const query = `UPDATE accounts SET name = ?, type = ?, member_id = ?, bank_code = ?, color_hex = ?, card_last_digits = ?, is_debit = ?, is_credit = ?, credit_limit = ?, closing_day = ?, due_day = ? WHERE id = ?`;
-            db.run(query, [name, type || 'PERSONAL', validatedMemberId, bankCode || null, colorHex || null, lastDigits || null, isDebitVal, isCreditVal, creditLimitVal, closingDay || null, dueDay || null, accountId], function(errUpdate) {
+            db.run(query, [name, type || 'PERSONAL', validatedMemberId, bankCode || null, colorHex || null, lastDigits || null, isDebitVal, isCreditVal, creditLimitVal, closingDayVal, dueDayVal, accountId], function(errUpdate) {
                 if (errUpdate) {
                     console.error('Erro ao atualizar conta:', errUpdate);
                     return res.status(500).json({ error: 'Erro ao atualizar conta' });

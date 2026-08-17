@@ -434,11 +434,22 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
             }
         }
             // Fetch Credit Cards and sum their transactions for the month
-            const creditCards = await queryPromise(`
-                SELECT id, name, closing_day, due_day, color_hex
-                FROM accounts 
+            let creditCards = await queryPromise(`
+                SELECT id, name, closing_day, due_day, color_hex, member_id
+                FROM accounts
                 WHERE family_id = ? AND is_credit = 1
             `, [familyId]);
+
+            // Mesma regra de visibilidade por dono usada pra recurring_bills acima
+            // (linha ~90): conta sem member_id é da casa (aparece pra todo mundo);
+            // com member_id só aparece pra quem está na lista. Sem isso, a fatura
+            // de um cartão pessoal de um membro aparecia pra família inteira.
+            if (currentUserId != null) {
+                creditCards = creditCards.filter(card => {
+                    const memIds = parseMemberIds(card.member_id);
+                    return memIds.length === 0 || memIds.includes(currentUserId);
+                });
+            }
 
             // Mesma fórmula usada em homeController.js pro badge "Contas Fixas a Pagar" —
             // desloca a transação pro mês da fatura em que ela realmente cai (soma 1 mês se
@@ -495,6 +506,17 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                         }
                     }
 
+                    let cardOwnerName = 'Casa';
+                    let cardOwnerAvatars = [];
+                    const cardMemIds = parseMemberIds(card.member_id);
+                    if (cardMemIds.length > 0) {
+                        const foundMembers = cardMemIds.map(id => members.find(m => m.id === id)).filter(Boolean);
+                        if (foundMembers.length > 0) {
+                            cardOwnerName = foundMembers.map(m => m.name.split(' ')[0]).join(', ');
+                            cardOwnerAvatars = foundMembers.map(m => m.avatar_url).filter(Boolean);
+                        }
+                    }
+
                     expenses.push({
                         id: `invoice_${card.id}`,
                         title: `Fatura - ${card.name}`,
@@ -506,11 +528,11 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                         categoryId: null,
                         categoryName: 'Cartão de Crédito',
                         categoryColor: card.color_hex || '#9E9E9E',
-                        memberId: null,
+                        memberId: card.member_id || null,
                         accountId: card.id,
                         paymentType: 'CREDIT_CARD',
-                        ownerName: 'Casa',
-                        ownerAvatars: [],
+                        ownerName: cardOwnerName,
+                        ownerAvatars: cardOwnerAvatars,
                         status: invoiceStatus,
                         statusColor: invoiceColor,
                         type: 'CREDIT_INVOICE'
