@@ -866,9 +866,22 @@ exports.updateFixedExpense = async (req, res) => {
                         [i + 1, inst.amount, inst.dueDate, existingRow.id]
                     );
                 } else {
+                    // Parcela nova de verdade (não existia linha nenhuma pra ela ainda) — pode
+                    // ser a primeira vez que essa conta ganha uma lista de parcelas explícitas,
+                    // vindo do modelo antigo (mensal, sem parcela própria), onde o pagamento era
+                    // rastreado só por transactions.recurring_bill_id. Sem essa checagem, uma
+                    // parcela cujo mês já tinha sido paga no modelo antigo nascia PENDING do
+                    // zero — a transação continuava vinculada à conta, só não a essa parcela
+                    // específica, e o card virava "Atrasado"/"Pendente" de novo do nada.
+                    const priorTx = await allPromise(
+                        `SELECT id FROM transactions WHERE recurring_bill_id = ? AND DATE_FORMAT(transaction_date, '%Y-%m') = DATE_FORMAT(?, '%Y-%m') LIMIT 1`,
+                        [expenseId, inst.dueDate]
+                    );
+                    const matchedTxId = priorTx[0] ? priorTx[0].id : null;
+
                     await runPromise(
-                        `INSERT INTO recurring_bill_installments (recurring_bill_id, installment_number, amount, due_date) VALUES (?, ?, ?, ?)`,
-                        [expenseId, i + 1, inst.amount, inst.dueDate]
+                        `INSERT INTO recurring_bill_installments (recurring_bill_id, installment_number, amount, due_date, status, transaction_id) VALUES (?, ?, ?, ?, ?, ?)`,
+                        [expenseId, i + 1, inst.amount, inst.dueDate, matchedTxId ? 'PAID' : 'PENDING', matchedTxId]
                     );
                 }
             }

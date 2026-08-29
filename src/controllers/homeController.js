@@ -145,7 +145,7 @@ exports.getHomeData = async (req, res) => {
         // dela. Busca mais linhas do que precisa e filtra em JS pra quem é dono da
         // transação (t.member_id inclui o usuário) ou da conta usada (a.member_id).
         const rawRecentTransactionsPool = await queryPromise(
-            `SELECT t.id, t.amount, t.type, t.description, t.transaction_date,
+            `SELECT t.id, t.amount, t.type, t.description, t.note, t.transaction_date,
                     t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type, t.recurring_bill_id,
                     a.name as account_name, a.member_id as account_member_id,
                     c.name as category_name, c.icon, c.color_hex

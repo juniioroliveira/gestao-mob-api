@@ -43,7 +43,7 @@ exports.getAccountTransactions = (req, res) => {
         const members = membersRows || [];
 
         const query = `
-            SELECT t.id, t.amount, t.type, t.description, t.transaction_date,
+            SELECT t.id, t.amount, t.type, t.description, t.note, t.transaction_date,
                    t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type,
                    a.name as account_name,
                    c.icon, c.color_hex
@@ -102,7 +102,7 @@ exports.getAccountTransactions = (req, res) => {
 };
 
 exports.createTransaction = async (req, res) => {
-    let { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType, note } = req.body;
     
     // Se o usuário não enviou o memberId ou não for admin, usa o próprio ID dele
     const memberId = reqMemberId || req.user.id;
@@ -233,21 +233,22 @@ exports.createTransaction = async (req, res) => {
             const recurringBillId = req.body.recurring_bill_id || null;
 
             const insertQuery = `
-                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments, recurring_bill_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, note, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments, recurring_bill_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
             const result = await runQuery(insertQuery, [
-                accountId, 
+                accountId,
                 type === 'TRANSFER' ? destinationAccountId : null,
                 JSON.stringify(req.body.memberId),
                 // Receita não obriga categoria mais — sem o "|| null" aqui, um categoryId
                 // omitido chega como `undefined` e o driver do MySQL rejeita o bind.
                 type === 'TRANSFER' ? null : (categoryId || null),
-                installmentAmount, 
-                type, 
-                desc, 
-                dateStr, 
-                req.body.is_ai_processed || false, 
+                installmentAmount,
+                type,
+                desc,
+                note || null,
+                dateStr,
+                req.body.is_ai_processed || false,
                 finalPaymentType,
                 installmentGroupId,
                 isInstallment ? i : null,
@@ -288,7 +289,7 @@ exports.createTransaction = async (req, res) => {
 exports.updateTransaction = async (req, res) => {
     const transactionId = req.params.id;
     const familyId = req.user.family_id;
-    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType, recurring_bill_id } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType, recurring_bill_id, note } = req.body;
 
     const finalPaymentType = paymentType || 'DEBIT';
     if (finalPaymentType === 'CASH' && !accountId) {
@@ -340,19 +341,20 @@ exports.updateTransaction = async (req, res) => {
 
         // 3. Atualizar a transação
         const updateQuery = `
-            UPDATE transactions 
-            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, transaction_date = ?, payment_type = ?, recurring_bill_id = ?
+            UPDATE transactions
+            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, note = ?, transaction_date = ?, payment_type = ?, recurring_bill_id = ?
             WHERE id = ?
         `;
         await runQuery(updateQuery, [
-            accountId, 
+            accountId,
             type === 'TRANSFER' ? destinationAccountId : null,
             JSON.stringify(req.body.memberId),
             type === 'TRANSFER' ? null : (categoryId || null),
-            amount, 
-            type, 
-            description, 
-            date, 
+            amount,
+            type,
+            description,
+            note || null,
+            date,
             finalPaymentType,
             recurring_bill_id || null,
             transactionId
