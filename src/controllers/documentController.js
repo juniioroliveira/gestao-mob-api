@@ -361,14 +361,17 @@ exports.confirmSuggestion = (req, res) => {
 
 // "Recusar" — a sugestão específica desse documento não vale, e a memória
 // desse recebedor esquece esse vínculo (não insiste na mesma sugestão errada
-// de novo), mas continua aprendendo categoria/valor normalmente.
+// de novo), mas continua aprendendo categoria/valor normalmente. Além disso,
+// grava a recusa em payee_bill_dismissals: sem isso, o findHistoricalBillMatch
+// (usado quando não sobra memória) reconstruía a mesma sugestão do zero a
+// partir do histórico de transações no próximo comprovante desse beneficiário.
 exports.dismissSuggestion = (req, res) => {
     const familyId = req.user.family_id;
     const memberId = req.user.id;
     const documentId = req.params.id;
 
     db.get(
-        `SELECT payee_key FROM inbox_documents WHERE id = ? AND family_id = ? AND member_id = ? AND suggestion_status = 'PENDING'`,
+        `SELECT payee_key, suggested_recurring_bill_id FROM inbox_documents WHERE id = ? AND family_id = ? AND member_id = ? AND suggestion_status = 'PENDING'`,
         [documentId, familyId, memberId],
         (err, row) => {
             if (err || !row) {
@@ -389,6 +392,18 @@ exports.dismissSuggestion = (req, res) => {
                         );
                     }
 
+                    // findHistoricalBillMatch busca só pelo beneficiário puro (sem a
+                    // mensagem do Pix, quando payee_key veio composto como
+                    // "beneficiario::mensagem") — a exclusão precisa valer no mesmo nível.
+                    if (row.payee_key && row.suggested_recurring_bill_id) {
+                        const beneficiaryKey = row.payee_key.split('::')[0];
+                        db.run(
+                            `INSERT IGNORE INTO payee_bill_dismissals (family_id, member_id, payee_key, recurring_bill_id) VALUES (?, ?, ?, ?)`,
+                            [familyId, memberId, beneficiaryKey, row.suggested_recurring_bill_id],
+                            () => {}
+                        );
+                    }
+
                     const { getIo } = require('../websockets/socket');
                     const io = getIo();
                     if (io) {
@@ -400,4 +415,53 @@ exports.dismissSuggestion = (req, res) => {
             );
         }
     );
+};
+
+// Sugestão pendente mais recente do membro logado — alimenta o banner
+// flutuante global (aparece em qualquer tela, não só na Caixa de Entrada).
+// Só uma por vez de propósito: mostrar várias ao mesmo tempo competiria por
+// atenção; a próxima aparece assim que essa for resolvida (Confirmar/Recusar)
+// ou o app reconsultar depois de um evento de WebSocket.
+exports.getPendingSuggestion = (req, res) => {
+    const familyId = req.user.family_id;
+    const memberId = req.user.id;
+
+    const query = `
+        SELECT d.id, d.extracted_data, d.file_name, d.suggested_recurring_bill_id, rb.name as suggested_bill_name
+        FROM inbox_documents d
+        JOIN recurring_bills rb ON rb.id = d.suggested_recurring_bill_id
+        WHERE d.family_id = ? AND d.member_id = ? AND d.suggestion_status = 'PENDING'
+        ORDER BY d.created_at DESC
+        LIMIT 1
+    `;
+
+    db.get(query, [familyId, memberId], (err, row) => {
+        if (err) {
+            console.error('Erro ao buscar sugestão pendente:', err);
+            return res.status(500).json({ error: 'Erro interno' });
+        }
+
+        if (!row) {
+            return res.json({ suggestion: null });
+        }
+
+        let description = null;
+        let amount = null;
+        try {
+            const extracted = JSON.parse(row.extracted_data || '{}');
+            description = extracted.description || null;
+            amount = extracted.amount != null ? Number(extracted.amount) : null;
+        } catch (_) {}
+
+        res.json({
+            suggestion: {
+                documentId: row.id,
+                fileName: row.file_name,
+                description,
+                amount,
+                suggestedBillId: row.suggested_recurring_bill_id,
+                suggestedBillName: row.suggested_bill_name,
+            }
+        });
+    });
 };

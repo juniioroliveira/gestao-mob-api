@@ -33,6 +33,7 @@ router.post('/upload', authenticateToken, upload.single('document'), documentCon
 router.get('/inbox', authenticateToken, documentController.getInboxDocuments);
 router.get('/:id/file', authenticateToken, documentController.getDocumentFile);
 router.get('/inbox/unread-count', authenticateToken, documentController.getUnreadCount);
+router.get('/inbox/pending-suggestion', authenticateToken, documentController.getPendingSuggestion);
 router.post('/inbox/mark-read', authenticateToken, documentController.markInboxRead);
 router.post('/:id/mark-read', authenticateToken, documentController.markDocumentRead);
 router.delete('/:id', authenticateToken, documentController.deleteDocument);

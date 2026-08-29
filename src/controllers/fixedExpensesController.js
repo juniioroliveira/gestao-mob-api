@@ -631,7 +631,7 @@ exports.unmarkInstallmentAsPaid = async (req, res) => {
     try {
         const row = await new Promise((resolve, reject) => {
             db.get(
-                `SELECT ri.id FROM recurring_bill_installments ri
+                `SELECT ri.id, ri.transaction_id FROM recurring_bill_installments ri
                  INNER JOIN recurring_bills rb ON rb.id = ri.recurring_bill_id
                  WHERE ri.id = ? AND rb.family_id = ?`,
                 [installmentId, familyId],
@@ -639,6 +639,14 @@ exports.unmarkInstallmentAsPaid = async (req, res) => {
             );
         });
         if (!row) return res.status(404).json({ error: 'Parcela não encontrada.' });
+
+        // A transação em si (quando veio de "Vincular transação") tem seu próprio
+        // recurring_bill_id apontando pra essa conta — sem limpar isso aqui, a
+        // parcela volta a "Pendente" mas a transação continua marcada como se
+        // pertencesse a essa conta, órfã da mesma forma que o modelo antigo tinha.
+        if (row.transaction_id) {
+            await runPromise(`UPDATE transactions SET recurring_bill_id = NULL WHERE id = ?`, [row.transaction_id]);
+        }
 
         await runPromise(`UPDATE recurring_bill_installments SET status = 'PENDING', transaction_id = NULL WHERE id = ?`, [installmentId]);
         triggerUpdate(familyId);
@@ -649,20 +657,45 @@ exports.unmarkInstallmentAsPaid = async (req, res) => {
     }
 };
 
-// Unmark a manual payment
-exports.unmarkAsPaid = (req, res) => {
+// Desfaz o "pago" de uma competência (mês) de uma conta do modelo antigo
+// (mensal, sem lista de parcelas explícitas). Uma conta pode estar "Pago" por
+// dois caminhos bem diferentes — fechamento manual ("Marcar como Pago, Sem
+// Lançamento", tabela bill_manual_payments) ou uma transação de verdade
+// vinculada (campo transactions.recurring_bill_id, via "Vincular transação"
+// ou lançamento direto) — então desfaz os dois, senão o "Desfazer pagamento"
+// resolvia um caso e a conta continuava aparecendo "Pago" pelo outro.
+exports.unmarkAsPaid = async (req, res) => {
     const familyId = req.user.family_id;
     const billId = req.params.id;
     const { referenceMonth } = req.body;
 
-    db.run(
-        `DELETE FROM bill_manual_payments WHERE family_id = ? AND recurring_bill_id = ? AND reference_month = ?`,
-        [familyId, billId, referenceMonth],
-        function(err) {
-            if (err) return res.status(500).json({ error: 'Erro ao desmarcar pagamento.' });
-            res.json({ message: 'Pagamento removido com sucesso.' });
-        }
-    );
+    if (!referenceMonth || !/^\d{4}-\d{2}$/.test(referenceMonth)) {
+        return res.status(400).json({ error: 'referenceMonth inválido. Use o formato YYYY-MM.' });
+    }
+
+    try {
+        await runPromise(
+            `DELETE FROM bill_manual_payments WHERE family_id = ? AND recurring_bill_id = ? AND reference_month = ?`,
+            [familyId, billId, referenceMonth]
+        );
+
+        // Desvincula (não apaga) qualquer transação lançada nesse mês que aponte
+        // pra essa conta — a transação em si continua existindo normalmente,
+        // só deixa de "fechar" essa competência.
+        await runPromise(
+            `UPDATE transactions t
+             JOIN accounts a ON a.id = t.account_id
+             SET t.recurring_bill_id = NULL
+             WHERE a.family_id = ? AND t.recurring_bill_id = ? AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?`,
+            [familyId, billId, referenceMonth]
+        );
+
+        triggerUpdate(familyId);
+        res.json({ message: 'Pagamento desfeito com sucesso.' });
+    } catch (err) {
+        console.error('Erro ao desmarcar pagamento:', err);
+        res.status(500).json({ error: 'Erro ao desmarcar pagamento.' });
+    }
 };
 
 // Valida e normaliza a lista de parcelas vinda do app: [{ amount, dueDate }, ...].

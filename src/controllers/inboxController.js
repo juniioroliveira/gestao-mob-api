@@ -51,18 +51,48 @@ function normalizePayeeKey(name) {
         .trim();
 }
 
+// Tolerância pra considerar dois valores "o mesmo pagamento" — contas variáveis
+// (convênio, cartão) oscilam mês a mês, então exigir igualdade exata descartaria
+// exatamente os casos legítimos que essa comparação existe pra cobrir.
+const AMOUNT_MATCH_TOLERANCE = 0.20;
+
+function amountsAreClose(a, b, tolerance = AMOUNT_MATCH_TOLERANCE) {
+    if (a == null || b == null) return false;
+    const numA = Number(a);
+    const numB = Number(b);
+    if (isNaN(numA) || isNaN(numB)) return false;
+    const base = Math.max(Math.abs(numA), Math.abs(numB));
+    if (base === 0) return numA === numB;
+    return Math.abs(numA - numB) / base <= tolerance;
+}
+
+// Beneficiários já recusados explicitamente ("Recusar" na sugestão) pra essa
+// conta específica — usado tanto aqui quanto pela memória, pra uma sugestão
+// recusada não voltar a nascer do histórico de transações da próxima vez.
+async function getDismissedBillIds(familyId, memberId, payeeKey) {
+    if (!payeeKey) return new Set();
+    const rows = await getQuery(
+        `SELECT recurring_bill_id FROM payee_bill_dismissals WHERE family_id = ? AND member_id = ? AND payee_key = ?`,
+        [familyId, memberId, payeeKey]
+    );
+    return new Set(rows.map(r => r.recurring_bill_id));
+}
+
 // Primeira vez que vemos esse recebedor (sem entrada em payee_memory ainda):
 // procura nas transações JÁ vinculadas a alguma conta fixa se esse mesmo nome
 // já apareceu antes — é o mesmo dado que o usuário gerou manualmente ao usar
 // "Vincular transação" na tela de Contas a Pagar. Só sugere se a maioria
 // esmagadora dos achados apontar pra mesma conta (evita sugestão errada por
-// coincidência de uma palavra comum).
-async function findHistoricalBillMatch(familyId, memberId, payeeKey) {
+// coincidência de uma palavra comum), o valor bater dentro da tolerância (evita
+// sugerir só porque o nome combina — uma cobrança de R$50 não é a mesma conta
+// que uma de R$1100 só por coincidência de beneficiário) e a conta não ter sido
+// recusada antes pra esse mesmo beneficiário (dismissedBillIds).
+async function findHistoricalBillMatch(familyId, memberId, payeeKey, currentAmount, dismissedBillIds = new Set()) {
     const words = payeeKey.split(' ').filter(w => w.length >= 4);
     if (words.length === 0) return null;
 
     const rows = await getQuery(
-        `SELECT t.description, t.member_id, t.recurring_bill_id, rb.member_id as bill_member_id
+        `SELECT t.description, t.member_id, t.amount, t.recurring_bill_id, rb.member_id as bill_member_id
          FROM transactions t
          JOIN accounts a ON t.account_id = a.id
          JOIN recurring_bills rb ON rb.id = t.recurring_bill_id
@@ -74,6 +104,8 @@ async function findHistoricalBillMatch(familyId, memberId, payeeKey) {
     // de rateio usado em todo o resto) — mais seguro que confiar em JSON_CONTAINS
     // do SQL num campo que às vezes é int solto, às vezes array serializado.
     const relevant = rows.filter(r => {
+        if (dismissedBillIds.has(r.recurring_bill_id)) return false;
+        if (!amountsAreClose(r.amount, currentAmount)) return false;
         const txOwners = parseMemberIds(r.member_id);
         const billOwners = parseMemberIds(r.bill_member_id);
         const ownsTx = txOwners.length === 0 || txOwners.includes(memberId);
@@ -278,15 +310,25 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
                 accountId = payeeMemory.last_account_id;
             }
 
-            if (payeeMemory && payeeMemory.recurring_bill_id) {
+            // Recusas são gravadas por beneficiário puro (não pela chave composta com
+            // a mensagem do Pix) — é esse o nível em que findHistoricalBillMatch
+            // busca, então é nesse nível que a exclusão precisa valer.
+            const dismissedBillIds = await getDismissedBillIds(familyId, memberId, beneficiaryKey).catch(() => new Set());
+
+            if (payeeMemory && payeeMemory.recurring_bill_id && !dismissedBillIds.has(payeeMemory.recurring_bill_id)
+                && amountsAreClose(amount, payeeMemory.last_amount)) {
+                // Valor bem diferente do que essa memória registrou da última vez —
+                // não sugere: nome bater sozinho não é confiança suficiente (foi
+                // exatamente esse tipo de caso, um Pix qualquer batendo o nome de um
+                // beneficiário genérico, que gerou o vínculo errado do Aluguel).
                 suggestedRecurringBillId = payeeMemory.recurring_bill_id;
-            } else {
-                // Primeira vez que vemos esse recebedor — busca nas transações já
-                // vinculadas manualmente antes dessa feature existir. Usa só o nome
-                // do beneficiário (não a chave composta com a mensagem do Pix): essa
-                // busca casa contra a descrição de transações antigas por palavra, e
-                // o separador "::" nunca vai aparecer lá.
-                suggestedRecurringBillId = await findHistoricalBillMatch(familyId, memberId, beneficiaryKey).catch(() => null);
+            } else if (!payeeMemory || !payeeMemory.recurring_bill_id) {
+                // Primeira vez que vemos esse recebedor (ou a memória não tem conta
+                // vinculada) — busca nas transações já vinculadas manualmente antes
+                // dessa feature existir. Usa só o nome do beneficiário (não a chave
+                // composta): essa busca casa contra a descrição de transações antigas
+                // por palavra, e o separador "::" nunca vai aparecer lá.
+                suggestedRecurringBillId = await findHistoricalBillMatch(familyId, memberId, beneficiaryKey, amount, dismissedBillIds).catch(() => null);
             }
         }
 
