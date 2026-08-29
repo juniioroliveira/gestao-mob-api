@@ -580,16 +580,31 @@ exports.getMonthlyOverview = async (req, res) => {
                     if (isQ1) expenseQ1 += amount; else expenseQ2 += amount;
                 } else if (t.type === 'INCOME') {
                     if (t.is_salary) {
-                        const role = currentUserId != null ? classifyRole(day) : (isQ1 ? 'advance' : 'salary');
-                        if (role === 'advance') hasAdvanceTx = true; else hasSalaryTxOwn = true;
-                        if (role === 'salary' && !isQ1) {
-                            // Fecha o ciclo perto do fim do mês — financia a quinzena 1
-                            // do mês SEGUINTE (contado lá via shiftedInSalary), não a
-                            // quinzena 2 daqui.
-                        } else if (isQ1) {
-                            salaryTxQ1 += amount;
+                        if (currentUserId != null) {
+                            const role = classifyRole(day);
+                            if (role === 'advance') {
+                                hasAdvanceTx = true;
+                                // Adiantamento financia SEMPRE a quinzena 2 (15-fim) do
+                                // mesmo mês, mesmo que o dia real de recebimento caia um
+                                // pouco antes do dia configurado (fim de semana/feriado
+                                // adiantam o depósito) — o que importa é o papel dele no
+                                // ciclo, não o dia exato em que caiu.
+                                salaryTxQ2 += amount;
+                            } else {
+                                hasSalaryTxOwn = true;
+                                if (isQ1) {
+                                    salaryTxQ1 += amount;
+                                }
+                                // Senão: fecha o ciclo perto do fim do mês — financia a
+                                // quinzena 1 do mês SEGUINTE (contado lá via
+                                // shiftedInSalary), não a quinzena 2 daqui.
+                            }
                         } else {
-                            salaryTxQ2 += amount;
+                            // Family scope sem perfil pra classificar o papel de verdade
+                            // — mantém o critério antigo (dia bruto da quinzena).
+                            hasAdvanceTx = true;
+                            hasSalaryTxOwn = true;
+                            if (isQ1) salaryTxQ1 += amount; else salaryTxQ2 += amount;
                         }
                     } else {
                         if (isQ1) otherIncomeQ1 += amount; else otherIncomeQ2 += amount;
@@ -751,10 +766,21 @@ exports.getMonthlyOverviewDetail = async (req, res) => {
               )
             : [];
 
+        // Nome de quem lançou, pro card da lista mostrar igual ao resto do
+        // app ("Junior", "Andressa"...) em vez do JSON cru de member_id.
+        const membersRows = await suggestionGetQuery(`SELECT id, name FROM members WHERE family_id = ?`, [familyId]);
+        const resolveMemberName = (memberIdRaw) => {
+            const ids = parseMemberIds(memberIdRaw);
+            const names = ids
+                .map(id => membersRows.find(m => m.id === id)?.name?.split(' ')[0])
+                .filter(Boolean);
+            return names.join(', ') || 'Desconhecido';
+        };
+
         const transactions = [];
         const addTx = (row, quinzena, tag) => {
             if (currentUserId != null && !parseMemberIds(row.member_id).includes(currentUserId)) return;
-            transactions.push({ ...row, quinzena, tag });
+            transactions.push({ ...row, member_name: resolveMemberName(row.member_id), quinzena, tag });
         };
 
         ownRows.forEach(row => {
@@ -762,13 +788,20 @@ exports.getMonthlyOverviewDetail = async (req, res) => {
             const isQ1 = day <= 14;
             if (row.type === 'INCOME' && row.is_salary) {
                 const role = currentUserId != null ? classifyRole(day) : (isQ1 ? 'advance' : 'salary');
-                if (role === 'salary' && !isQ1) {
+                if (role === 'advance') {
+                    // Adiantamento financia SEMPRE a quinzena 2 do mesmo mês, mesmo
+                    // que o dia real caia um pouco antes do configurado — é o papel
+                    // dele no ciclo que importa, não o dia exato.
+                    addTx(row, 2, 'adiantamento');
+                    return;
+                }
+                if (!isQ1) {
                     // Vai contar na quinzena 1 do mês seguinte, não aqui — ainda assim
                     // mostra nessa lista (é uma transação real deste mês), só marcada.
                     addTx(row, 2, 'salario_desloca_proximo_mes');
                     return;
                 }
-                addTx(row, isQ1 ? 1 : 2, role === 'advance' ? 'adiantamento' : 'salario');
+                addTx(row, 1, 'salario');
                 return;
             }
             addTx(row, isQ1 ? 1 : 2, row.type === 'INCOME' ? 'outra_receita' : 'despesa');

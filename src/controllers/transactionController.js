@@ -36,6 +36,14 @@ exports.getAccountTransactions = (req, res) => {
         params.push(accountId, accountId);
     }
 
+    // Filtro opcional por tipo (entrada/saída/transferência) — usado pela
+    // Visão Mensal pra deixar o feed só com um lado quando o usuário escolhe.
+    const type = ['EXPENSE', 'INCOME', 'TRANSFER'].includes(req.query.type) ? req.query.type : null;
+    if (type) {
+        whereClauses.push('t.type = ?');
+        params.push(type);
+    }
+
     const whereStr = whereClauses.join(' AND ');
 
     db.all(`SELECT id, name FROM members WHERE family_id = ?`, [familyId], (err, membersRows) => {
