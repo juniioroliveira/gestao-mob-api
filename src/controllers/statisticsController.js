@@ -468,17 +468,22 @@ exports.getSuggestedCategoryPercent = async (req, res) => {
 
 const MONTH_ABBR_PT = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 
-// Visão mensal por quinzena: "Saídas" (despesas soltas + o que ainda falta pagar
-// de contas a pagar daquela quinzena) contra "Receitas". Duas fontes deliberadas
-// pra "Saídas", sem sobrepor uma na outra:
-//   - Despesas soltas: toda transação EXPENSE já lançada no mês — é dinheiro que
-//     JÁ saiu, seja de um gasto avulso ou do pagamento de uma conta a pagar.
-//   - Contas a pagar (só a parte "Pago" != true): o valor programado de contas a
-//     pagar que ainda NÃO virou transação — é o que falta sair. Reaproveita
-//     computeExpensesForMonth (mesma lógica de recorrência/parcelas da tela de
-//     Contas a Pagar) em vez de reimplementar due_day/parcelas do zero.
-// Uma conta já paga não entra aqui de novo: a transação dela já está contada em
-// "despesas soltas", então family somar de novo pelo valor programado duplicaria.
+// Visão mensal por quinzena, seguindo o CICLO real de pagamento, não só o
+// calendário cru:
+//   - Receitas da quinzena 1 (dia 1-14): entram aqui as receitas lançadas
+//     nesse intervalo E o salário que fecha o ciclo (o pagamento perto do fim
+//     do mês ANTERIOR, que pode cair no último dia útil antes disso por causa
+//     de fim de semana/feriado) — é o mesmo dinheiro que sustenta essas contas,
+//     só que caiu um pouco antes da virada do mês. O adiantamento (perto do
+//     dia 15) não sofre esse deslocamento: ele já nasce dentro da quinzena que
+//     financia, então fica normal na quinzena 2.
+//   - Despesas de cada quinzena: despesas soltas lançadas nela + contas a
+//     pagar (ainda não pagas) com vencimento nela + contas a pagar não pagas
+//     do CICLO anterior (pra quinzena 1, é a quinzena 2 do mês passado; pra
+//     quinzena 2, é a quinzena 1 do mesmo mês) — o que não foi resolvido no
+//     ciclo dele continua pesando no seguinte até ser pago.
+// Reaproveita computeExpensesForMonth (mesma lógica de recorrência/parcelas da
+// tela de Contas a Pagar) em vez de reimplementar due_day/parcelas do zero.
 exports.getMonthlyOverview = async (req, res) => {
     const familyId = req.user.family_id;
     const familyScope = req.query.scope === 'family';
@@ -503,12 +508,10 @@ exports.getMonthlyOverview = async (req, res) => {
     try {
         const { computeExpensesForMonth } = require('./fixedExpensesController');
 
-        // Perfil de salário/adiantamento do usuário logado — usado só quando um mês
-        // não tem NENHUMA transação marcada como salário ainda (tipicamente meses
-        // futuros): projeta o valor configurado no perfil em vez de mostrar R$0 de
-        // receita só porque o salário daquele mês ainda não foi lançado. Em
-        // scope=family isso não se aplica (não dá pra somar o perfil de todo mundo
-        // com segurança sem saber o rateio de cada um).
+        // Perfil de salário/adiantamento do usuário logado — usado só quando falta
+        // transação real pro papel específico (adiantamento ou salário), tipicamente
+        // em meses futuros. Em scope=family isso não se aplica (não dá pra somar o
+        // perfil de todo mundo com segurança sem saber o rateio de cada um).
         let salaryProfile = null;
         if (currentUserId != null) {
             salaryProfile = await suggestionGetOne(
@@ -516,26 +519,42 @@ exports.getMonthlyOverview = async (req, res) => {
                 [currentUserId]
             );
         }
+        const advanceDay = salaryProfile?.advance_day || null;
+        const salaryDay = salaryProfile?.salary_day || null;
+
+        // Decide se um recebimento marcado como salário é o "adiantamento" ou o
+        // "salário" que fecha o ciclo, comparando o dia dele com os dois dias
+        // configurados no perfil — o mais próximo ganha. Só o segundo sofre o
+        // deslocamento pra quinzena 1 do mês seguinte.
+        function classifyRole(day) {
+            if (advanceDay && salaryDay) {
+                return Math.abs(day - advanceDay) <= Math.abs(day - salaryDay) ? 'advance' : 'salary';
+            }
+            if (advanceDay) return 'advance';
+            return 'salary';
+        }
 
         const months = [];
         for (const { month, year } of targetMonths) {
             const monthStr = `${year}-${String(month).padStart(2, '0')}`;
+            const prevDate = new Date(year, month - 2, 1);
+            const prevMonthStr = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
 
-            // Contas a pagar dessa competência específica que ainda não viraram
-            // transação. Filtra por referenceMonth === monthStr (não só pelo mês
-            // consultado) porque computeExpensesForMonth também devolve atrasados
-            // de meses anteriores arrastados pra cá — sem esse filtro, o mesmo
-            // atraso apareceria de novo em cada mês seguinte que a gente consultasse.
+            // Contas a pagar (ainda não pagas) dessa competência e da anterior —
+            // computeExpensesForMonth já devolve o histórico completo de atrasados
+            // até esse mês, cada ocorrência com o referenceMonth original dela, então
+            // dá pra pegar o ciclo anterior sem uma segunda chamada.
             const billOccurrences = await computeExpensesForMonth(familyId, month, year, null, currentUserId);
-            let billsQ1 = 0;
-            let billsQ2 = 0;
-            billOccurrences
-                .filter(e => e.referenceMonth === monthStr && e.status !== 'Pago')
-                .forEach(e => {
-                    const due = e.dueDay || 1;
-                    const amount = Number(e.amount) || 0;
-                    if (due <= 14) billsQ1 += amount; else billsQ2 += amount;
-                });
+            const unpaidSum = (ref, dueFilter) => billOccurrences
+                .filter(e => e.referenceMonth === ref && e.status !== 'Pago' && dueFilter(e.dueDay || 1))
+                .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+            const billsQ1Own = unpaidSum(monthStr, d => d <= 14);
+            const billsQ2Own = unpaidSum(monthStr, d => d > 14);
+            const carryIntoQ1 = unpaidSum(prevMonthStr, d => d > 14);
+            const carryIntoQ2 = billsQ1Own;
+            const billsQ1 = billsQ1Own + carryIntoQ1;
+            const billsQ2 = billsQ2Own + carryIntoQ2;
 
             // Despesas e receitas já lançadas nesse mês, por quinzena.
             const txRows = await suggestionGetQuery(
@@ -551,43 +570,78 @@ exports.getMonthlyOverview = async (req, res) => {
             // não só a soma — pra tela poder mostrar a barra dividida: despesas
             // soltas x contas a pagar, salário x demais receitas.
             let expenseQ1 = 0, expenseQ2 = 0, salaryTxQ1 = 0, salaryTxQ2 = 0, otherIncomeQ1 = 0, otherIncomeQ2 = 0;
-            let hasSalaryTx = false;
+            let hasAdvanceTx = false, hasSalaryTxOwn = false;
             txRows.forEach(t => {
                 if (currentUserId != null && !parseMemberIds(t.member_id).includes(currentUserId)) return;
                 const amount = Number(t.amount) || 0;
-                const isQ1 = (t.day || 1) <= 14;
+                const day = t.day || 1;
+                const isQ1 = day <= 14;
                 if (t.type === 'EXPENSE') {
                     if (isQ1) expenseQ1 += amount; else expenseQ2 += amount;
                 } else if (t.type === 'INCOME') {
                     if (t.is_salary) {
-                        hasSalaryTx = true;
-                        if (isQ1) salaryTxQ1 += amount; else salaryTxQ2 += amount;
+                        const role = currentUserId != null ? classifyRole(day) : (isQ1 ? 'advance' : 'salary');
+                        if (role === 'advance') hasAdvanceTx = true; else hasSalaryTxOwn = true;
+                        if (role === 'salary' && !isQ1) {
+                            // Fecha o ciclo perto do fim do mês — financia a quinzena 1
+                            // do mês SEGUINTE (contado lá via shiftedInSalary), não a
+                            // quinzena 2 daqui.
+                        } else if (isQ1) {
+                            salaryTxQ1 += amount;
+                        } else {
+                            salaryTxQ2 += amount;
+                        }
                     } else {
                         if (isQ1) otherIncomeQ1 += amount; else otherIncomeQ2 += amount;
                     }
                 }
             });
 
-            // Sem nenhuma transação marcada como salário nesse mês (o caso normal
-            // pra qualquer mês futuro, e também um mês passado onde ninguém marcou
-            // ainda) — projeta a partir do perfil, respeitando adiantamento e
-            // salário como dois eventos em dias diferentes, cada um na sua quinzena.
-            // Vai pro lado "salário" da barra, nunca em "outras receitas".
-            let salaryQ1 = salaryTxQ1, salaryQ2 = salaryTxQ2;
-            if (!hasSalaryTx && salaryProfile && Number(salaryProfile.monthly_income) > 0) {
+            // Salário do fim do mês ANTERIOR que financia a quinzena 1 deste mês —
+            // busca independente de paginação/lote: a data já resolve tudo, não
+            // depende do mês anterior ter sido carregado antes neste request.
+            let shiftedInSalary = 0;
+            let hasRealShiftIn = false;
+            if (currentUserId != null) {
+                const prevSalaryRows = await suggestionGetQuery(
+                    `SELECT t.amount, DAY(t.transaction_date) as day, t.member_id
+                     FROM transactions t
+                     JOIN accounts a ON a.id = t.account_id
+                     WHERE a.family_id = ? AND t.type = 'INCOME' AND t.is_salary = 1
+                       AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?`,
+                    [familyId, prevMonthStr]
+                );
+                prevSalaryRows.forEach(t => {
+                    if (!parseMemberIds(t.member_id).includes(currentUserId)) return;
+                    const day = t.day || 1;
+                    if (day <= 14 || classifyRole(day) !== 'salary') return;
+                    shiftedInSalary += Number(t.amount) || 0;
+                    hasRealShiftIn = true;
+                });
+            }
+
+            let salaryQ1 = salaryTxQ1 + shiftedInSalary;
+            let salaryQ2 = salaryTxQ2;
+
+            // Projeção pelo perfil só entra quando falta transação real pro papel
+            // específico (adiantamento ou salário) — nunca soma em cima do que já
+            // foi lançado.
+            if (currentUserId != null && salaryProfile && Number(salaryProfile.monthly_income) > 0) {
                 const monthlyIncome = Number(salaryProfile.monthly_income) || 0;
                 const advanceValue = Number(salaryProfile.advance_value) || 0;
-                const salaryDay = salaryProfile.salary_day || null;
-                const advanceDay = salaryProfile.advance_day || null;
+                const hasAdvanceValue = advanceDay && advanceValue > 0;
 
-                if (advanceDay && advanceValue > 0) {
+                if (hasAdvanceValue && !hasAdvanceTx) {
                     if (advanceDay <= 14) salaryQ1 += advanceValue; else salaryQ2 += advanceValue;
-                    const remainder = monthlyIncome - advanceValue;
-                    const remainderDay = salaryDay || advanceDay;
-                    if (remainderDay <= 14) salaryQ1 += remainder; else salaryQ2 += remainder;
-                } else {
-                    const day = salaryDay || 5;
-                    if (day <= 14) salaryQ1 += monthlyIncome; else salaryQ2 += monthlyIncome;
+                }
+                const remainder = hasAdvanceValue ? monthlyIncome - advanceValue : monthlyIncome;
+                const remainderDay = salaryDay || advanceDay || 5;
+                if (remainderDay <= 14) {
+                    if (!hasSalaryTxOwn) salaryQ1 += remainder;
+                } else if (!hasRealShiftIn) {
+                    // Projeta o salário de fim do mês anterior direto na quinzena 1
+                    // deste mês, sem transação lançada ainda pra confirmar.
+                    salaryQ1 += remainder;
                 }
             }
 
@@ -625,123 +679,141 @@ exports.getMonthlyOverview = async (req, res) => {
     }
 };
 
+// Detalhe de um mês da Visão Mensal: a lista crua de transações e contas a
+// pagar que compõem os números das barras, pra debugar visualmente (e editar
+// direto, reaproveitando a mesma tela de edição usada no resto do app) em vez
+// de confiar cegamente na soma. Cada item já vem marcado com a quinzena em
+// que ENTROU na conta (não sempre a quinzena calendário — ver getMonthlyOverview).
+exports.getMonthlyOverviewDetail = async (req, res) => {
+    const familyId = req.user.family_id;
+    const familyScope = req.query.scope === 'family';
+    const currentUserId = familyScope ? null : req.user.id;
+    const month = parseInt(req.query.month, 10);
+    const year = parseInt(req.query.year, 10);
+
+    if (!month || !year || month < 1 || month > 12) {
+        return res.status(400).json({ error: 'month/year inválidos' });
+    }
+
+    try {
+        const { computeExpensesForMonth } = require('./fixedExpensesController');
+        const monthStr = `${year}-${String(month).padStart(2, '0')}`;
+        const prevDate = new Date(year, month - 2, 1);
+        const prevMonthStr = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
+
+        let salaryProfile = null;
+        if (currentUserId != null) {
+            salaryProfile = await suggestionGetOne(
+                `SELECT salary_day, advance_day FROM members WHERE id = ?`,
+                [currentUserId]
+            );
+        }
+        const advanceDay = salaryProfile?.advance_day || null;
+        const salaryDay = salaryProfile?.salary_day || null;
+        function classifyRole(day) {
+            if (advanceDay && salaryDay) {
+                return Math.abs(day - advanceDay) <= Math.abs(day - salaryDay) ? 'advance' : 'salary';
+            }
+            if (advanceDay) return 'advance';
+            return 'salary';
+        }
+
+        // Transações do próprio mês.
+        const ownRows = await suggestionGetQuery(
+            `SELECT t.id, t.amount, t.type, t.description, t.note, t.transaction_date,
+                    t.account_id, t.destination_account_id, t.category_id, t.member_id,
+                    t.payment_type, t.recurring_bill_id, t.is_salary,
+                    a.name as account_name, c.icon, c.color_hex
+             FROM transactions t
+             JOIN accounts a ON a.id = t.account_id
+             LEFT JOIN categories c ON c.id = t.category_id
+             WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME')
+               AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?
+             ORDER BY t.transaction_date ASC, t.id ASC`,
+            [familyId, monthStr]
+        );
+
+        // Salário do fim do mês anterior, que essa Visão Mensal conta na
+        // quinzena 1 daqui — mostrado junto pra fechar a conta visualmente,
+        // mesmo sendo de outra competência.
+        const shiftedRows = currentUserId != null
+            ? await suggestionGetQuery(
+                `SELECT t.id, t.amount, t.type, t.description, t.note, t.transaction_date,
+                        t.account_id, t.destination_account_id, t.category_id, t.member_id,
+                        t.payment_type, t.recurring_bill_id, t.is_salary,
+                        a.name as account_name, c.icon, c.color_hex
+                 FROM transactions t
+                 JOIN accounts a ON a.id = t.account_id
+                 LEFT JOIN categories c ON c.id = t.category_id
+                 WHERE a.family_id = ? AND t.type = 'INCOME' AND t.is_salary = 1
+                   AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?`,
+                [familyId, prevMonthStr]
+              )
+            : [];
+
+        const transactions = [];
+        const addTx = (row, quinzena, tag) => {
+            if (currentUserId != null && !parseMemberIds(row.member_id).includes(currentUserId)) return;
+            transactions.push({ ...row, quinzena, tag });
+        };
+
+        ownRows.forEach(row => {
+            const day = new Date(row.transaction_date).getDate();
+            const isQ1 = day <= 14;
+            if (row.type === 'INCOME' && row.is_salary) {
+                const role = currentUserId != null ? classifyRole(day) : (isQ1 ? 'advance' : 'salary');
+                if (role === 'salary' && !isQ1) {
+                    // Vai contar na quinzena 1 do mês seguinte, não aqui — ainda assim
+                    // mostra nessa lista (é uma transação real deste mês), só marcada.
+                    addTx(row, 2, 'salario_desloca_proximo_mes');
+                    return;
+                }
+                addTx(row, isQ1 ? 1 : 2, role === 'advance' ? 'adiantamento' : 'salario');
+                return;
+            }
+            addTx(row, isQ1 ? 1 : 2, row.type === 'INCOME' ? 'outra_receita' : 'despesa');
+        });
+
+        shiftedRows.forEach(row => {
+            const day = new Date(row.transaction_date).getDate();
+            if (day <= 14 || classifyRole(day) !== 'salary') return;
+            addTx(row, 1, 'salario_mes_anterior');
+        });
+
+        // Contas a pagar (ainda não pagas) que entram nos totais — não são
+        // transações, então aparecem só pra contexto, sem edição por aqui.
+        const billOccurrences = await computeExpensesForMonth(familyId, month, year, null, currentUserId);
+        const bills = [];
+        const addBill = (e, quinzena, tag) => bills.push({
+            title: e.title,
+            amount: Number(e.amount) || 0,
+            dueDay: e.dueDay,
+            referenceMonth: e.referenceMonth,
+            status: e.status,
+            quinzena,
+            tag,
+        });
+        billOccurrences
+            .filter(e => e.referenceMonth === monthStr && e.status !== 'Pago')
+            .forEach(e => addBill(e, (e.dueDay || 1) <= 14 ? 1 : 2, 'propria_quinzena'));
+        billOccurrences
+            .filter(e => e.referenceMonth === prevMonthStr && e.status !== 'Pago' && (e.dueDay || 1) > 14)
+            .forEach(e => addBill(e, 1, 'atrasada_ciclo_anterior'));
+        // Mesma regra pro sentido dentro do mês: o que venceu na quinzena 1 e
+        // continua sem pagar também pesa (de novo) na quinzena 2 — por isso
+        // aparece aqui duas vezes, uma por quinzena, refletindo a soma real.
+        billOccurrences
+            .filter(e => e.referenceMonth === monthStr && e.status !== 'Pago' && (e.dueDay || 1) <= 14)
+            .forEach(e => addBill(e, 2, 'atrasada_ciclo_anterior'));
+
+        res.json({ month, year, transactions, bills });
+    } catch (err) {
+        console.error('Erro ao montar detalhe da visão mensal:', err);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
+};
+
 function round2(n) {
     return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-// Cobertura de pagamento: responde "o [adiantamento/salário] que eu vou
-// receber é suficiente pras contas que ele precisa cobrir?" — pergunta
-// diferente da Visão Mensal (que é olhar pra trás por competência). Aqui o
-// pareamento renda->contas segue o CICLO real de pagamento, não a quinzena
-// calendário: um adiantamento recebido no dia 15 cobre as contas com
-// vencimento de 15 até o fim DO MESMO mês; já o salário/complemento (o
-// evento que cai por último no ciclo, normalmente perto do fim do mês) cobre
-// as contas de 1 a 14 do mês SEGUINTE — é o intervalo até o próximo
-// adiantamento, não o resto do mês em que ele caiu.
-exports.getPaymentCoverage = async (req, res) => {
-    const familyId = req.user.family_id;
-    const currentUserId = req.user.id;
-
-    try {
-        const profile = await suggestionGetOne(
-            `SELECT monthly_income, salary_day, advance_day, advance_value FROM members WHERE id = ?`,
-            [currentUserId]
-        );
-        if (!profile || (!profile.salary_day && !profile.advance_day)) {
-            return res.json({ periods: [] });
-        }
-
-        const { computeExpensesForMonth } = require('./fixedExpensesController');
-        const monthlyIncome = Number(profile.monthly_income) || 0;
-        const advanceValue = Number(profile.advance_value) || 0;
-        const hasAdvance = !!profile.advance_day && advanceValue > 0;
-        const remainderValue = hasAdvance ? monthlyIncome - advanceValue : monthlyIncome;
-
-        const events = [];
-        if (hasAdvance) {
-            events.push({ type: 'advance', day: profile.advance_day, amount: advanceValue });
-        }
-        if (profile.salary_day || !hasAdvance) {
-            events.push({ type: 'salary', day: profile.salary_day || 5, amount: remainderValue });
-        }
-
-        const now = new Date();
-        const today = now.getDate();
-
-        const periods = [];
-        for (const ev of events) {
-            // Próxima ocorrência desse evento a partir de hoje (se o dia já
-            // passou nesse mês, é o mesmo dia do mês que vem).
-            let payMonth = now.getMonth() + 1;
-            let payYear = now.getFullYear();
-            if (ev.day < today) {
-                payMonth += 1;
-                if (payMonth > 12) { payMonth = 1; payYear += 1; }
-            }
-
-            // Período que esse pagamento cobre.
-            let coverMonth = payMonth, coverYear = payYear, rangeStart, rangeEnd;
-            if (ev.type === 'advance') {
-                rangeStart = 15;
-                rangeEnd = 31;
-            } else {
-                rangeStart = 1;
-                rangeEnd = 14;
-                coverMonth += 1;
-                if (coverMonth > 12) { coverMonth = 1; coverYear += 1; }
-            }
-
-            const payMonthStr = `${payYear}-${String(payMonth).padStart(2, '0')}`;
-            const payDateStr = `${payMonthStr}-${String(ev.day).padStart(2, '0')}`;
-
-            // Já existe uma transação real marcada como salário perto dessa
-            // data de pagamento? Usa o valor real dela em vez do projetado.
-            const realTx = await suggestionGetOne(
-                `SELECT t.amount FROM transactions t
-                 JOIN accounts a ON a.id = t.account_id
-                 WHERE a.family_id = ? AND t.type = 'INCOME' AND t.is_salary = 1
-                   AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?
-                 ORDER BY ABS(DATEDIFF(t.transaction_date, ?)) ASC
-                 LIMIT 1`,
-                [familyId, payMonthStr, payDateStr]
-            );
-            const income = realTx ? Number(realTx.amount) : ev.amount;
-
-            // Contas a pagar (ainda não pagas) com vencimento dentro do
-            // intervalo coberto — mesma fonte de dados da tela de Contas a
-            // Pagar, só filtrando pelo intervalo de dias em vez da quinzena.
-            const coverMonthStr = `${coverYear}-${String(coverMonth).padStart(2, '0')}`;
-            const occurrences = await computeExpensesForMonth(familyId, coverMonth, coverYear, null, currentUserId);
-            const billsTotal = occurrences
-                .filter(e => e.referenceMonth === coverMonthStr && e.status !== 'Pago')
-                .filter(e => {
-                    const due = e.dueDay || 1;
-                    return due >= rangeStart && due <= rangeEnd;
-                })
-                .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-
-            periods.push({
-                type: ev.type,
-                label: ev.type === 'advance' ? 'Adiantamento' : 'Salário',
-                payDay: ev.day,
-                payMonth,
-                payYear,
-                income: round2(income),
-                isProjected: !realTx,
-                coverStart: rangeStart,
-                coverEnd: rangeEnd,
-                coverMonth,
-                coverYear,
-                billsTotal: round2(billsTotal),
-                balance: round2(income - billsTotal),
-            });
-        }
-
-        periods.sort((a, b) => new Date(a.payYear, a.payMonth - 1, a.payDay) - new Date(b.payYear, b.payMonth - 1, b.payDay));
-
-        res.json({ periods });
-    } catch (err) {
-        console.error('Erro ao calcular cobertura de pagamento:', err);
-        res.status(500).json({ error: 'Erro interno no servidor' });
-    }
-};
