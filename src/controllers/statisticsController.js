@@ -483,12 +483,20 @@ exports.getMonthlyOverview = async (req, res) => {
     const familyId = req.user.family_id;
     const familyScope = req.query.scope === 'family';
     const currentUserId = familyScope ? null : req.user.id;
-    const monthsCount = Math.min(Math.max(parseInt(req.query.months, 10) || 6, 1), 12);
+    const monthsCount = Math.min(Math.max(parseInt(req.query.months, 10) || 6, 1), 24);
 
+    // endMonth/endYear definem o mês mais recente da janela pedida (default: mês
+    // atual) — o app pede janelas anteriores ou futuras passando esses dois pra
+    // trás/frente, em vez de tudo ficar preso numa janela fixa de 6 meses. Contas
+    // fixas se repetem pra sempre e contas com parcela têm data de cada parcela
+    // definida, então não tem limite natural nenhum aqui — só o que o app pedir.
     const now = new Date();
+    const endMonth = req.query.endMonth ? parseInt(req.query.endMonth, 10) : now.getMonth() + 1;
+    const endYear = req.query.endYear ? parseInt(req.query.endYear, 10) : now.getFullYear();
+
     const targetMonths = [];
     for (let i = monthsCount - 1; i >= 0; i--) {
-        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const d = new Date(endYear, endMonth - 1 - i, 1);
         targetMonths.push({ month: d.getMonth() + 1, year: d.getFullYear() });
     }
 
