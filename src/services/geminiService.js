@@ -115,19 +115,41 @@ async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) 
     if (!ai) return null;
     
     const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
-    const accountsList = accounts.map(a => ({ id: a.id, name: a.name }));
-    
+    // card_last_digits vai junto pra IA poder casar a conta pelos 4 últimos dígitos
+    // do cartão em vez de depender só do nome do banco bater exatamente — nome de
+    // banco no comprovante varia demais ("NU PAGAMENTOS" vs "Nubank", "PicPay
+    // Cartão" vs "PicPay"...) e isso era o principal motivo de criar conta duplicada.
+    const accountsList = accounts.map(a => ({ id: a.id, name: a.name, card_last_digits: a.card_last_digits || null }));
+
     const currentYear = new Date().getFullYear();
     const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
 Sua tarefa é analisar a imagem enviada (que pode ser um comprovante bancário oficial, um PDF, ou um Print/Screenshot da tela do aplicativo do banco mostrando o extrato/transação) e extrair os dados da transação.
+
+Siga esta ordem de prioridade ao analisar a imagem:
+
+PASSO 1 — Identifique primeiro os pontos principais, exatamente nesta ordem:
+  a) Os 4 últimos dígitos do cartão/conta usados na transação, se aparecerem na imagem (procure por padrões como "final 4092", "•••• 4092", "**** 4092", "Cartão final 4092").
+  b) A data (e o horário, se visível) real em que a transação ocorreu.
+  c) O beneficiário: nome do estabelecimento (para EXPENSE) ou de quem pagou/transferiu (para INCOME).
+  d) O valor da transação.
+
+PASSO 2 — Só depois de ter esses pontos principais, resolva as informações adicionais: categoria e a conta de origem.
+
+REGRA DE OURO para escolher "accountId" (conta de origem):
+- Se você identificou os 4 últimos dígitos do cartão E alguma conta em "Lista de Contas/Carteiras Disponíveis" tem esse mesmo "card_last_digits", USE O ID DESSA CONTA e "shouldCreateAccount": false — mesmo que o nome do banco escrito na imagem seja diferente do nome salvo na conta. Bater os 4 dígitos tem prioridade sobre bater o nome do banco.
+- Só recorra ao nome do banco/instituição pra encontrar a conta quando não houver dígitos visíveis na imagem, ou quando nenhuma conta cadastrada tiver esses dígitos.
+- Só marque "shouldCreateAccount": true quando NENHUMA conta da lista bater nem pelos dígitos nem pelo nome do banco/instituição.
+
 Retorne um objeto JSON estrito com os seguintes campos exatos:
+- "cardLastDigits": string com os 4 últimos dígitos do cartão identificados na imagem (ex: "4092"), ou null se não aparecerem.
 - "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
 - "amount": Valor da transação (Número Float, utilize ponto para decimais, não use vírgulas).
 - "date": A data real da transação que está impressa no comprovante, estritamente no formato "YYYY-MM-DD". ATENÇÃO: procure pela data em que o pagamento/transferência ocorreu. Se o ano não estiver explícito na imagem, ASSUMA OBRIGATORIAMENTE o ano atual de ${currentYear}. Não invente anos passados.
+- "time": Horário da transação no formato "HH:MM" (24h) se estiver visível no comprovante, ou null caso contrário.
 - "type": Exatamente "EXPENSE" (se for pagamento, compra, pix enviado) ou "INCOME" (se for recebimento).
 - "categoryId": O ID numérico da categoria correspondente da lista fornecida. Combine exatamente o tipo da transação. Se houver dúvida e for despesa, escolha "Outros" ou similar.
-- "accountId": O ID numérico da conta/instituição correspondente da lista.
-- "shouldCreateAccount": Booleano (true) se a instituição/banco do comprovante não estiver na lista de contas fornecidas.
+- "accountId": O ID numérico da conta/instituição correspondente da lista, seguindo a REGRA DE OURO acima.
+- "shouldCreateAccount": Booleano (true) se nenhuma conta da lista corresponder (nem por dígitos, nem por nome).
 - "newAccountName": O nome da instituição (ex: "Nubank") caso shouldCreateAccount seja true.
 
 Responda APENAS com a estrutura JSON bruta, sem formatações Markdown (como \`\`\`json) ou textos explicativos.`;
@@ -158,8 +180,29 @@ ${JSON.stringify(accountsList, null, 2)}
                     responseMimeType: 'application/json'
                 }
             });
-            
-            return JSON.parse(response.text.trim());
+
+            const parsed = JSON.parse(response.text.trim());
+
+            // Não confia só no palpite da IA pra "accountId" — se ela leu os 4
+            // últimos dígitos do cartão no comprovante, casa direto contra o
+            // cadastro aqui no código. Isso garante o match mesmo se a IA errar a
+            // resolução da conta (ex: interpretar mal um nome de banco parecido),
+            // desde que os dígitos tenham sido lidos corretamente.
+            if (parsed && parsed.cardLastDigits) {
+                const digits = String(parsed.cardLastDigits).replace(/\D/g, '').slice(-4);
+                if (digits.length === 4) {
+                    const matchedAccount = accounts.find(a =>
+                        a.card_last_digits && String(a.card_last_digits).replace(/\D/g, '').slice(-4) === digits
+                    );
+                    if (matchedAccount) {
+                        parsed.accountId = matchedAccount.id;
+                        parsed.shouldCreateAccount = false;
+                        parsed.newAccountName = null;
+                    }
+                }
+            }
+
+            return parsed;
         } catch (error) {
             console.error(`❌ Erro no Gemini (Tentativas Restantes: ${retries - 1}):`, error.message);
             retries--;

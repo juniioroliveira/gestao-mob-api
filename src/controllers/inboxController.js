@@ -202,7 +202,11 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
         // Obter categorias e contas
         const categories = await getQuery('SELECT id, name, type FROM categories WHERE family_id = ?', [familyId]);
         // Só contas visíveis pra quem enviou o comprovante: a dele ou compartilhada.
-        const accounts = await getQuery('SELECT id, name FROM accounts WHERE family_id = ? AND (member_id IS NULL OR member_id = ?)', [familyId, memberId]);
+        // card_last_digits vai junto pro geminiService poder casar a conta pelos 4
+        // últimos dígitos do cartão em vez de só pelo nome do banco (ver ali o
+        // porquê — nome de banco no comprovante variar demais era a causa mais
+        // comum de duplicar conta).
+        const accounts = await getQuery('SELECT id, name, card_last_digits FROM accounts WHERE family_id = ? AND (member_id IS NULL OR member_id = ?)', [familyId, memberId]);
 
         // Enviar para a IA
         const aiResult = await extractReceiptWithAI(fileBuffer, mimeType, categories, accounts);
@@ -216,9 +220,18 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
         let accountId = aiResult.accountId;
 
         if (aiResult.shouldCreateAccount && aiResult.newAccountName) {
+            // 'CHECKING' não existe no seletor de Tipo de Conta do app (só PERSONAL,
+            // INVESTMENT, CREDIT) — uma conta criada com esse valor caía com o
+            // dropdown "Tipo de Conta" sem nenhuma opção selecionada na tela de
+            // editar. Grava também os 4 últimos dígitos identificados no
+            // comprovante (se a IA leu algum) pra já existir cadastro suficiente
+            // pra próximos comprovantes desse mesmo cartão baterem de primeira.
+            const digits = aiResult.cardLastDigits
+                ? String(aiResult.cardLastDigits).replace(/\D/g, '').slice(-4) || null
+                : null;
             const insertAccount = await runQuery(
-                'INSERT INTO accounts (family_id, name, current_balance, type) VALUES (?, ?, 0, ?)', 
-                [familyId, aiResult.newAccountName, 'CHECKING']
+                'INSERT INTO accounts (family_id, name, current_balance, type, card_last_digits, is_debit, is_credit) VALUES (?, ?, 0, ?, ?, 1, 0)',
+                [familyId, aiResult.newAccountName, 'PERSONAL', digits]
             );
             accountId = insertAccount.lastID;
         }
