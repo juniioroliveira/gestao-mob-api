@@ -628,3 +628,120 @@ exports.getMonthlyOverview = async (req, res) => {
 function round2(n) {
     return Math.round((n + Number.EPSILON) * 100) / 100;
 }
+
+// Cobertura de pagamento: responde "o [adiantamento/salário] que eu vou
+// receber é suficiente pras contas que ele precisa cobrir?" — pergunta
+// diferente da Visão Mensal (que é olhar pra trás por competência). Aqui o
+// pareamento renda->contas segue o CICLO real de pagamento, não a quinzena
+// calendário: um adiantamento recebido no dia 15 cobre as contas com
+// vencimento de 15 até o fim DO MESMO mês; já o salário/complemento (o
+// evento que cai por último no ciclo, normalmente perto do fim do mês) cobre
+// as contas de 1 a 14 do mês SEGUINTE — é o intervalo até o próximo
+// adiantamento, não o resto do mês em que ele caiu.
+exports.getPaymentCoverage = async (req, res) => {
+    const familyId = req.user.family_id;
+    const currentUserId = req.user.id;
+
+    try {
+        const profile = await suggestionGetOne(
+            `SELECT monthly_income, salary_day, advance_day, advance_value FROM members WHERE id = ?`,
+            [currentUserId]
+        );
+        if (!profile || (!profile.salary_day && !profile.advance_day)) {
+            return res.json({ periods: [] });
+        }
+
+        const { computeExpensesForMonth } = require('./fixedExpensesController');
+        const monthlyIncome = Number(profile.monthly_income) || 0;
+        const advanceValue = Number(profile.advance_value) || 0;
+        const hasAdvance = !!profile.advance_day && advanceValue > 0;
+        const remainderValue = hasAdvance ? monthlyIncome - advanceValue : monthlyIncome;
+
+        const events = [];
+        if (hasAdvance) {
+            events.push({ type: 'advance', day: profile.advance_day, amount: advanceValue });
+        }
+        if (profile.salary_day || !hasAdvance) {
+            events.push({ type: 'salary', day: profile.salary_day || 5, amount: remainderValue });
+        }
+
+        const now = new Date();
+        const today = now.getDate();
+
+        const periods = [];
+        for (const ev of events) {
+            // Próxima ocorrência desse evento a partir de hoje (se o dia já
+            // passou nesse mês, é o mesmo dia do mês que vem).
+            let payMonth = now.getMonth() + 1;
+            let payYear = now.getFullYear();
+            if (ev.day < today) {
+                payMonth += 1;
+                if (payMonth > 12) { payMonth = 1; payYear += 1; }
+            }
+
+            // Período que esse pagamento cobre.
+            let coverMonth = payMonth, coverYear = payYear, rangeStart, rangeEnd;
+            if (ev.type === 'advance') {
+                rangeStart = 15;
+                rangeEnd = 31;
+            } else {
+                rangeStart = 1;
+                rangeEnd = 14;
+                coverMonth += 1;
+                if (coverMonth > 12) { coverMonth = 1; coverYear += 1; }
+            }
+
+            const payMonthStr = `${payYear}-${String(payMonth).padStart(2, '0')}`;
+            const payDateStr = `${payMonthStr}-${String(ev.day).padStart(2, '0')}`;
+
+            // Já existe uma transação real marcada como salário perto dessa
+            // data de pagamento? Usa o valor real dela em vez do projetado.
+            const realTx = await suggestionGetOne(
+                `SELECT t.amount FROM transactions t
+                 JOIN accounts a ON a.id = t.account_id
+                 WHERE a.family_id = ? AND t.type = 'INCOME' AND t.is_salary = 1
+                   AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?
+                 ORDER BY ABS(DATEDIFF(t.transaction_date, ?)) ASC
+                 LIMIT 1`,
+                [familyId, payMonthStr, payDateStr]
+            );
+            const income = realTx ? Number(realTx.amount) : ev.amount;
+
+            // Contas a pagar (ainda não pagas) com vencimento dentro do
+            // intervalo coberto — mesma fonte de dados da tela de Contas a
+            // Pagar, só filtrando pelo intervalo de dias em vez da quinzena.
+            const coverMonthStr = `${coverYear}-${String(coverMonth).padStart(2, '0')}`;
+            const occurrences = await computeExpensesForMonth(familyId, coverMonth, coverYear, null, currentUserId);
+            const billsTotal = occurrences
+                .filter(e => e.referenceMonth === coverMonthStr && e.status !== 'Pago')
+                .filter(e => {
+                    const due = e.dueDay || 1;
+                    return due >= rangeStart && due <= rangeEnd;
+                })
+                .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+            periods.push({
+                type: ev.type,
+                label: ev.type === 'advance' ? 'Adiantamento' : 'Salário',
+                payDay: ev.day,
+                payMonth,
+                payYear,
+                income: round2(income),
+                isProjected: !realTx,
+                coverStart: rangeStart,
+                coverEnd: rangeEnd,
+                coverMonth,
+                coverYear,
+                billsTotal: round2(billsTotal),
+                balance: round2(income - billsTotal),
+            });
+        }
+
+        periods.sort((a, b) => new Date(a.payYear, a.payMonth - 1, a.payDay) - new Date(b.payYear, b.payMonth - 1, b.payDay));
+
+        res.json({ periods });
+    } catch (err) {
+        console.error('Erro ao calcular cobertura de pagamento:', err);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
+};
