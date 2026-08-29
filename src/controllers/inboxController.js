@@ -217,24 +217,13 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
             return;
         }
 
+        // accountId já vem resolvido do geminiService por dígitos do cartão ou nome
+        // do banco (accountMatchMethod: 'digits' | 'name' | 'none'). Não criamos
+        // conta nova sozinhos aqui nunca mais — sem match nenhum, accountId fica
+        // null até a memória do beneficiário (mais abaixo) ou o fallback pra
+        // Carteira resolverem.
         let accountId = aiResult.accountId;
-
-        if (aiResult.shouldCreateAccount && aiResult.newAccountName) {
-            // 'CHECKING' não existe no seletor de Tipo de Conta do app (só PERSONAL,
-            // INVESTMENT, CREDIT) — uma conta criada com esse valor caía com o
-            // dropdown "Tipo de Conta" sem nenhuma opção selecionada na tela de
-            // editar. Grava também os 4 últimos dígitos identificados no
-            // comprovante (se a IA leu algum) pra já existir cadastro suficiente
-            // pra próximos comprovantes desse mesmo cartão baterem de primeira.
-            const digits = aiResult.cardLastDigits
-                ? String(aiResult.cardLastDigits).replace(/\D/g, '').slice(-4) || null
-                : null;
-            const insertAccount = await runQuery(
-                'INSERT INTO accounts (family_id, name, current_balance, type, card_last_digits, is_debit, is_credit) VALUES (?, ?, 0, ?, ?, 1, 0)',
-                [familyId, aiResult.newAccountName, 'PERSONAL', digits]
-            );
-            accountId = insertAccount.lastID;
-        }
+        const accountMatchMethod = aiResult.accountMatchMethod || 'none';
 
         let categoryId = aiResult.categoryId;
         if (!categoryId) {
@@ -242,11 +231,6 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
             if (fallbackCat.length > 0) {
                 categoryId = fallbackCat[0].id;
             }
-        }
-
-        if (!accountId) {
-            const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
-            accountId = await getOrCreateWalletAccountId(familyId);
         }
 
         const type = (aiResult.type || 'EXPENSE').toUpperCase();
@@ -259,13 +243,24 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
             date = new Date().toISOString().split('T')[0];
         }
 
-        // Memória do recebedor: se já vimos esse nome antes, a categoria que a
-        // família usou historicamente pra ele é mais confiável que um palpite a
-        // frio da IA — sobrescreve categoryId direto, sem precisar de confirmação
-        // (baixo risco, é só categorização). Já a sugestão de conta a pagar
-        // (suggestedRecurringBillId) sempre depende de confirmação manual do
-        // usuário na Caixa de Entrada — nunca vincula sozinha.
-        const payeeKey = normalizePayeeKey(description);
+        // Chave de memória do beneficiário: quando o Pix tem mensagem/descrição
+        // (ex: "aluguel agosto"), ela entra na chave junto com o nome — um mesmo
+        // beneficiário (ex: "Andressa") pode receber por motivos bem diferentes
+        // (rateio de aluguel num mês, de mercado no outro), e sem isso a memória
+        // ia misturar tudo e sugerir sempre a mesma conta/categoria da última vez,
+        // não da vez certa. O `description` mostrado na transação continua sendo
+        // só o nome do beneficiário, intacto — a mensagem só entra na CHAVE.
+        const beneficiaryKey = normalizePayeeKey(description);
+        const noteKey = aiResult.note ? normalizePayeeKey(aiResult.note) : '';
+        const payeeKey = noteKey ? `${beneficiaryKey}::${noteKey}` : beneficiaryKey;
+
+        // Memória do recebedor: se já vimos esse mesmo par (beneficiário + motivo)
+        // antes, a categoria E a conta que a família usou da última vez são mais
+        // confiáveis que um palpite a frio — mas a conta só é sobrescrita quando
+        // não veio de um match por dígitos (identidade > estatística). A sugestão
+        // de conta a pagar (suggestedRecurringBillId) continua sempre dependendo
+        // de confirmação manual do usuário na Caixa de Entrada — nunca vincula
+        // sozinha.
         let payeeMemory = null;
         let suggestedRecurringBillId = null;
         if (payeeKey) {
@@ -279,13 +274,30 @@ async function processDocumentAsync(documentId, familyId, memberId, fileBuffer, 
                 categoryId = payeeMemory.last_category_id;
             }
 
+            if (payeeMemory && payeeMemory.last_account_id && accountMatchMethod !== 'digits') {
+                accountId = payeeMemory.last_account_id;
+            }
+
             if (payeeMemory && payeeMemory.recurring_bill_id) {
                 suggestedRecurringBillId = payeeMemory.recurring_bill_id;
             } else {
                 // Primeira vez que vemos esse recebedor — busca nas transações já
-                // vinculadas manualmente antes dessa feature existir.
-                suggestedRecurringBillId = await findHistoricalBillMatch(familyId, memberId, payeeKey).catch(() => null);
+                // vinculadas manualmente antes dessa feature existir. Usa só o nome
+                // do beneficiário (não a chave composta com a mensagem do Pix): essa
+                // busca casa contra a descrição de transações antigas por palavra, e
+                // o separador "::" nunca vai aparecer lá.
+                suggestedRecurringBillId = await findHistoricalBillMatch(familyId, memberId, beneficiaryKey).catch(() => null);
             }
+        }
+
+        // Nada bateu (nem dígito, nem nome de banco, nem memória desse
+        // beneficiário/motivo): não inventa conta nova. Cai na "Carteira"
+        // genérica — já existe, é visível, e é só editar a transação depois pra
+        // apontar pra conta certa. É a rede de segurança que substitui o antigo
+        // "cria conta nova automaticamente", que era a causa dos cartões duplicados.
+        if (!accountId) {
+            const { getOrCreateWalletAccountId } = require('../utils/walletHelper');
+            accountId = await getOrCreateWalletAccountId(familyId);
         }
 
         // Fake Req e Res para o transactionController

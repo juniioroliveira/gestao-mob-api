@@ -9,6 +9,77 @@ if (apiKey) {
     console.warn('⚠️ GEMINI_API_KEY não configurada no arquivo .env. Enriquecimento por IA ficará desativado.');
 }
 
+// Normaliza um nome de banco/instituição pra comparar com tolerância: minúsculo,
+// sem acento, sem pontuação, e sem os termos corporativos que só atrapalham o
+// match ("S.A.", "Pagamentos", "Instituição de Pagamento"...). Existe porque o
+// nome que aparece num comprovante quase nunca é igual ao nome cadastrado na
+// conta (ex: "NU PAGAMENTOS S.A." no comprovante vs "Nubank" cadastrado).
+const INSTITUTION_NOISE_TERMS = [
+    's a', 'sa', 'ltda', 'me', 'eireli',
+    'instituicao de pagamento', 'instituicao financeira', 'instituicao',
+    'pagamentos', 'servicos financeiros', 'servicos', 'financeira',
+    'banco multiplo', 'banco',
+];
+
+// Apelidos conhecidos: o nome oficial de registro de um fintech raramente é o
+// nome que a família usaria pra batizar a conta no app.
+const INSTITUTION_ALIASES = {
+    nu: 'nubank',
+    'nu pagamentos': 'nubank',
+    'nu financeira': 'nubank',
+    picpay: 'picpay',
+    mercadopago: 'mercado pago',
+    'mercado pago': 'mercado pago',
+    'itau unibanco': 'itau',
+    'caixa economica federal': 'caixa',
+    'santander brasil': 'santander',
+    original: 'original',
+    c6: 'c6 bank',
+    will: 'will bank',
+    neon: 'neon',
+    stone: 'stone',
+    'pagseguro internet': 'pagbank',
+};
+
+function normalizeInstitutionName(raw) {
+    if (!raw) return '';
+    let s = raw
+        .toString()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // remove acentos (combining diacritics pós NFD)
+        .replace(/[^a-z0-9\s]/g, ' '); // remove pontuação
+    for (const term of INSTITUTION_NOISE_TERMS) {
+        s = s.replace(new RegExp(`\\b${term}\\b`, 'g'), ' ');
+    }
+    return s.replace(/\s+/g, ' ').trim();
+}
+
+function canonicalInstitutionName(raw) {
+    const norm = normalizeInstitutionName(raw);
+    return INSTITUTION_ALIASES[norm] || norm;
+}
+
+// Casa o nome de instituição extraído do comprovante contra as contas
+// cadastradas da família. Usa igualdade após normalização, ou "contém" nos dois
+// sentidos pra pegar variações tipo "Nubank" dentro de "Banco Nubank S.A.".
+// Nomes curtos (<4 chars) ficam de fora do "contém" pra não dar falso positivo
+// (ex: "c6" apareceria dentro de qualquer string com essas duas letras juntas).
+function findAccountByInstitutionName(accounts, rawName) {
+    if (!rawName) return null;
+    const target = canonicalInstitutionName(rawName);
+    if (!target) return null;
+    for (const acc of accounts) {
+        const accName = canonicalInstitutionName(acc.name);
+        if (!accName) continue;
+        if (accName === target) return acc;
+        if (accName.length >= 4 && target.length >= 4 && (accName.includes(target) || target.includes(accName))) {
+            return acc;
+        }
+    }
+    return null;
+}
+
 /**
  * Enriquece e categoriza uma lista de transações brutas usando Gemini Flash-Lite.
  * 
@@ -113,14 +184,15 @@ ${JSON.stringify(transactions.map(t => ({
  */
 async function extractReceiptWithAI(fileBuffer, mimeType, categories, accounts) {
     if (!ai) return null;
-    
-    const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
-    // card_last_digits vai junto pra IA poder casar a conta pelos 4 últimos dígitos
-    // do cartão em vez de depender só do nome do banco bater exatamente — nome de
-    // banco no comprovante varia demais ("NU PAGAMENTOS" vs "Nubank", "PicPay
-    // Cartão" vs "PicPay"...) e isso era o principal motivo de criar conta duplicada.
-    const accountsList = accounts.map(a => ({ id: a.id, name: a.name, card_last_digits: a.card_last_digits || null }));
 
+    const categoriesList = categories.map(c => ({ id: c.id, name: c.name, type: c.type }));
+    // A lista de contas NÃO vai mais pro prompt: a IA deixou de decidir "accountId"
+    // sozinha (ver mais abaixo, depois do parse). Ela só extrai o que está na
+    // imagem (dígitos do cartão, nome do banco de origem); o casamento contra o
+    // cadastro é 100% determinístico aqui no código — dígito bate, ganha; senão
+    // nome normalizado; senão fica pra memória do beneficiário resolver no
+    // inboxController. Isso fecha a causa raiz de conta duplicada: a IA nunca
+    // mais tem autoridade pra criar conta nova por conta própria.
     const currentYear = new Date().getFullYear();
     const systemInstruction = `Você é um assistente financeiro especializado do aplicativo "Gestão Mob".
 Sua tarefa é analisar a imagem enviada (que pode ser um comprovante bancário oficial, um PDF, ou um Print/Screenshot da tela do aplicativo do banco mostrando o extrato/transação) e extrair os dados da transação.
@@ -128,38 +200,33 @@ Sua tarefa é analisar a imagem enviada (que pode ser um comprovante bancário o
 Siga esta ordem de prioridade ao analisar a imagem:
 
 PASSO 1 — Identifique primeiro os pontos principais, exatamente nesta ordem:
-  a) Os 4 últimos dígitos do cartão/conta usados na transação, se aparecerem na imagem (procure por padrões como "final 4092", "•••• 4092", "**** 4092", "Cartão final 4092").
-  b) A data (e o horário, se visível) real em que a transação ocorreu.
-  c) O beneficiário: nome do estabelecimento (para EXPENSE) ou de quem pagou/transferiu (para INCOME).
-  d) O valor da transação.
+  a) Os 4 últimos dígitos do cartão usados na transação, se aparecerem na imagem (procure por padrões como "final 4092", "•••• 4092", "**** 4092", "Cartão final 4092"). Em Pix normalmente não existem — nesse caso retorne null.
+  b) O nome do banco/instituição DE ORIGEM — de quem é a conta que pagou/recebeu, geralmente a marca/logo do próprio app ou papel que gerou o comprovante. NÃO confunda com o beneficiário do item (d).
+  c) A data (e o horário, se visível) real em que a transação ocorreu.
+  d) O beneficiário: nome do estabelecimento (para EXPENSE) ou de quem pagou/transferiu (para INCOME).
+  e) O valor da transação.
+  f) Em transferências Pix: se houver um campo de mensagem/descrição/observação escrito por quem pagou (ex: "aluguel agosto", "rateio mercado"), extraia esse texto também — é diferente do nome do beneficiário.
 
-PASSO 2 — Só depois de ter esses pontos principais, resolva as informações adicionais: categoria e a conta de origem.
+PASSO 2 — Só depois de ter esses pontos principais, resolva a informação adicional: a categoria mais adequada da lista fornecida.
 
-REGRA DE OURO para escolher "accountId" (conta de origem):
-- Se você identificou os 4 últimos dígitos do cartão E alguma conta em "Lista de Contas/Carteiras Disponíveis" tem esse mesmo "card_last_digits", USE O ID DESSA CONTA e "shouldCreateAccount": false — mesmo que o nome do banco escrito na imagem seja diferente do nome salvo na conta. Bater os 4 dígitos tem prioridade sobre bater o nome do banco.
-- Só recorra ao nome do banco/instituição pra encontrar a conta quando não houver dígitos visíveis na imagem, ou quando nenhuma conta cadastrada tiver esses dígitos.
-- Só marque "shouldCreateAccount": true quando NENHUMA conta da lista bater nem pelos dígitos nem pelo nome do banco/instituição.
+Não tente decidir a qual conta cadastrada isso pertence, nem sugerir criação de conta — isso é resolvido por outro sistema depois da sua resposta, você só descreve o que está na imagem.
 
 Retorne um objeto JSON estrito com os seguintes campos exatos:
-- "cardLastDigits": string com os 4 últimos dígitos do cartão identificados na imagem (ex: "4092"), ou null se não aparecerem.
-- "description": Nome limpo e amigável do estabelecimento ou recebedor. Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
+- "cardLastDigits": string com os 4 últimos dígitos do cartão identificados na imagem (ex: "4092"), ou null se não aparecerem (normal em Pix).
+- "originInstitutionName": nome do banco/instituição de origem tal como aparece na imagem (ex: "Nu Pagamentos S.A.", "PicPay"), ou null se não for possível identificar.
+- "description": Nome limpo e amigável do beneficiário/recebedor (ou de quem pagou, se for INCOME). Remova dados irrelevantes como CNPJ/CPF e instituições intermediárias.
+- "note": O texto da mensagem/descrição/observação que a pessoa que pagou escreveu no Pix, se houver (ex: "aluguel agosto"), ou null se não houver nenhuma mensagem visível na imagem.
 - "amount": Valor da transação (Número Float, utilize ponto para decimais, não use vírgulas).
 - "date": A data real da transação que está impressa no comprovante, estritamente no formato "YYYY-MM-DD". ATENÇÃO: procure pela data em que o pagamento/transferência ocorreu. Se o ano não estiver explícito na imagem, ASSUMA OBRIGATORIAMENTE o ano atual de ${currentYear}. Não invente anos passados.
 - "time": Horário da transação no formato "HH:MM" (24h) se estiver visível no comprovante, ou null caso contrário.
 - "type": Exatamente "EXPENSE" (se for pagamento, compra, pix enviado) ou "INCOME" (se for recebimento).
 - "categoryId": O ID numérico da categoria correspondente da lista fornecida. Combine exatamente o tipo da transação. Se houver dúvida e for despesa, escolha "Outros" ou similar.
-- "accountId": O ID numérico da conta/instituição correspondente da lista, seguindo a REGRA DE OURO acima.
-- "shouldCreateAccount": Booleano (true) se nenhuma conta da lista corresponder (nem por dígitos, nem por nome).
-- "newAccountName": O nome da instituição (ex: "Nubank") caso shouldCreateAccount seja true.
 
 Responda APENAS com a estrutura JSON bruta, sem formatações Markdown (como \`\`\`json) ou textos explicativos.`;
 
     const prompt = `
 Lista de Categorias Disponíveis:
 ${JSON.stringify(categoriesList, null, 2)}
-
-Lista de Contas/Carteiras Disponíveis:
-${JSON.stringify(accountsList, null, 2)}
 `;
 
     // Lógica de Retry para lidar com Erros 503 e 429
@@ -183,22 +250,37 @@ ${JSON.stringify(accountsList, null, 2)}
 
             const parsed = JSON.parse(response.text.trim());
 
-            // Não confia só no palpite da IA pra "accountId" — se ela leu os 4
-            // últimos dígitos do cartão no comprovante, casa direto contra o
-            // cadastro aqui no código. Isso garante o match mesmo se a IA errar a
-            // resolução da conta (ex: interpretar mal um nome de banco parecido),
-            // desde que os dígitos tenham sido lidos corretamente.
-            if (parsed && parsed.cardLastDigits) {
+            // Resolução de conta 100% determinística, fora das mãos da IA — ela só
+            // descreveu o que viu na imagem (dígitos, nome do banco). A partir daqui
+            // decidimos qual conta cadastrada é essa, em ordem de confiança:
+            //   1) 4 últimos dígitos do cartão batendo com uma conta (identidade,
+            //      não depende de a IA ter lido o nome do banco corretamente).
+            //   2) Nome do banco de origem, normalizado e tolerante a variação
+            //      (ex: "NU PAGAMENTOS S.A." casa com conta chamada "Nubank").
+            //   3) Nenhum dos dois: accountId fica null. O inboxController ainda
+            //      tenta a memória do beneficiário antes de desistir — nunca mais
+            //      criamos conta nova sozinhos aqui.
+            parsed.accountId = null;
+            parsed.accountMatchMethod = 'none';
+
+            if (parsed.cardLastDigits) {
                 const digits = String(parsed.cardLastDigits).replace(/\D/g, '').slice(-4);
                 if (digits.length === 4) {
-                    const matchedAccount = accounts.find(a =>
+                    const matchedByDigits = accounts.find(a =>
                         a.card_last_digits && String(a.card_last_digits).replace(/\D/g, '').slice(-4) === digits
                     );
-                    if (matchedAccount) {
-                        parsed.accountId = matchedAccount.id;
-                        parsed.shouldCreateAccount = false;
-                        parsed.newAccountName = null;
+                    if (matchedByDigits) {
+                        parsed.accountId = matchedByDigits.id;
+                        parsed.accountMatchMethod = 'digits';
                     }
+                }
+            }
+
+            if (!parsed.accountId && parsed.originInstitutionName) {
+                const matchedByName = findAccountByInstitutionName(accounts, parsed.originInstitutionName);
+                if (matchedByName) {
+                    parsed.accountId = matchedByName.id;
+                    parsed.accountMatchMethod = 'name';
                 }
             }
 
