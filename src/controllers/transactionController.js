@@ -43,7 +43,7 @@ exports.getAccountTransactions = (req, res) => {
         const members = membersRows || [];
 
         const query = `
-            SELECT t.id, t.amount, t.type, t.description, t.note, t.transaction_date,
+            SELECT t.id, t.amount, t.type, t.description, t.note, t.is_salary, t.transaction_date,
                    t.account_id, t.destination_account_id, t.category_id, t.member_id, t.payment_type,
                    a.name as account_name,
                    c.icon, c.color_hex
@@ -102,7 +102,7 @@ exports.getAccountTransactions = (req, res) => {
 };
 
 exports.createTransaction = async (req, res) => {
-    let { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType, note } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, memberId: reqMemberId, paymentType, note, isSalary } = req.body;
     
     // Se o usuário não enviou o memberId ou não for admin, usa o próprio ID dele
     const memberId = reqMemberId || req.user.id;
@@ -233,8 +233,8 @@ exports.createTransaction = async (req, res) => {
             const recurringBillId = req.body.recurring_bill_id || null;
 
             const insertQuery = `
-                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, note, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments, recurring_bill_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO transactions (account_id, destination_account_id, member_id, category_id, amount, type, description, note, transaction_date, is_ai_processed, payment_type, installment_group_id, installment_number, total_installments, recurring_bill_id, is_salary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
             const result = await runQuery(insertQuery, [
                 accountId,
@@ -253,7 +253,8 @@ exports.createTransaction = async (req, res) => {
                 installmentGroupId,
                 isInstallment ? i : null,
                 isInstallment ? totalInstallments : null,
-                recurringBillId
+                recurringBillId,
+                isSalary ? 1 : 0
             ]);
             if (i === 1) firstResultId = result.lastID;
         }
@@ -289,7 +290,7 @@ exports.createTransaction = async (req, res) => {
 exports.updateTransaction = async (req, res) => {
     const transactionId = req.params.id;
     const familyId = req.user.family_id;
-    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType, recurring_bill_id, note } = req.body;
+    let { accountId, destinationAccountId, categoryId, amount, type, description, date, paymentType, recurring_bill_id, note, isSalary } = req.body;
 
     const finalPaymentType = paymentType || 'DEBIT';
     if (finalPaymentType === 'CASH' && !accountId) {
@@ -342,7 +343,7 @@ exports.updateTransaction = async (req, res) => {
         // 3. Atualizar a transação
         const updateQuery = `
             UPDATE transactions
-            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, note = ?, transaction_date = ?, payment_type = ?, recurring_bill_id = ?
+            SET account_id = ?, destination_account_id = ?, member_id = ?, category_id = ?, amount = ?, type = ?, description = ?, note = ?, transaction_date = ?, payment_type = ?, recurring_bill_id = ?, is_salary = ?
             WHERE id = ?
         `;
         await runQuery(updateQuery, [
@@ -357,6 +358,7 @@ exports.updateTransaction = async (req, res) => {
             date,
             finalPaymentType,
             recurring_bill_id || null,
+            isSalary ? 1 : 0,
             transactionId
         ]);
 

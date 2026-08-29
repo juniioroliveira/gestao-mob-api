@@ -503,6 +503,20 @@ exports.getMonthlyOverview = async (req, res) => {
     try {
         const { computeExpensesForMonth } = require('./fixedExpensesController');
 
+        // Perfil de salário/adiantamento do usuário logado — usado só quando um mês
+        // não tem NENHUMA transação marcada como salário ainda (tipicamente meses
+        // futuros): projeta o valor configurado no perfil em vez de mostrar R$0 de
+        // receita só porque o salário daquele mês ainda não foi lançado. Em
+        // scope=family isso não se aplica (não dá pra somar o perfil de todo mundo
+        // com segurança sem saber o rateio de cada um).
+        let salaryProfile = null;
+        if (currentUserId != null) {
+            salaryProfile = await suggestionGetOne(
+                `SELECT monthly_income, salary_day, advance_day, advance_value FROM members WHERE id = ?`,
+                [currentUserId]
+            );
+        }
+
         const months = [];
         for (const { month, year } of targetMonths) {
             const monthStr = `${year}-${String(month).padStart(2, '0')}`;
@@ -525,7 +539,7 @@ exports.getMonthlyOverview = async (req, res) => {
 
             // Despesas e receitas já lançadas nesse mês, por quinzena.
             const txRows = await suggestionGetQuery(
-                `SELECT t.type, t.amount, t.member_id, DAY(t.transaction_date) as day
+                `SELECT t.type, t.amount, t.member_id, t.is_salary, DAY(t.transaction_date) as day
                  FROM transactions t
                  JOIN accounts a ON a.id = t.account_id
                  WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME')
@@ -534,6 +548,7 @@ exports.getMonthlyOverview = async (req, res) => {
             );
 
             let expenseQ1 = 0, expenseQ2 = 0, incomeQ1 = 0, incomeQ2 = 0;
+            let hasSalaryTx = false;
             txRows.forEach(t => {
                 if (currentUserId != null && !parseMemberIds(t.member_id).includes(currentUserId)) return;
                 const amount = Number(t.amount) || 0;
@@ -542,8 +557,30 @@ exports.getMonthlyOverview = async (req, res) => {
                     if (isQ1) expenseQ1 += amount; else expenseQ2 += amount;
                 } else if (t.type === 'INCOME') {
                     if (isQ1) incomeQ1 += amount; else incomeQ2 += amount;
+                    if (t.is_salary) hasSalaryTx = true;
                 }
             });
+
+            // Sem nenhuma transação marcada como salário nesse mês (o caso normal
+            // pra qualquer mês futuro, e também um mês passado onde ninguém marcou
+            // ainda) — projeta a partir do perfil, respeitando adiantamento e
+            // salário como dois eventos em dias diferentes, cada um na sua quinzena.
+            if (!hasSalaryTx && salaryProfile && Number(salaryProfile.monthly_income) > 0) {
+                const monthlyIncome = Number(salaryProfile.monthly_income) || 0;
+                const advanceValue = Number(salaryProfile.advance_value) || 0;
+                const salaryDay = salaryProfile.salary_day || null;
+                const advanceDay = salaryProfile.advance_day || null;
+
+                if (advanceDay && advanceValue > 0) {
+                    if (advanceDay <= 15) incomeQ1 += advanceValue; else incomeQ2 += advanceValue;
+                    const remainder = monthlyIncome - advanceValue;
+                    const remainderDay = salaryDay || advanceDay;
+                    if (remainderDay <= 15) incomeQ1 += remainder; else incomeQ2 += remainder;
+                } else {
+                    const day = salaryDay || 5;
+                    if (day <= 15) incomeQ1 += monthlyIncome; else incomeQ2 += monthlyIncome;
+                }
+            }
 
             months.push({
                 month,
