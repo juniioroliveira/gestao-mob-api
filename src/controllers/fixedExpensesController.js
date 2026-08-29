@@ -230,6 +230,10 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                         rawAmount: inst.amount,
                         dueDate: `${String(instDate.getDate()).padStart(2, '0')}/${String(instMonth).padStart(2, '0')}`,
                         dueDay: instDate.getDate(),
+                        // Só o modelo antigo (abaixo) preenchia isso — sem ele aqui, quem
+                        // filtra por competência exata (ex: visão mensal por quinzena)
+                        // descartava toda conta com parcela explícita por engano.
+                        referenceMonth: `${instYear}-${String(instMonth).padStart(2, '0')}`,
                         isActive: Boolean(row.is_active),
                         categoryId: row.category_id,
                         categoryName: row.category_name,

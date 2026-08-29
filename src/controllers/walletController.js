@@ -9,22 +9,37 @@ const { getPeriodForDueDay: getPeriodForDueDaySalaryRule } = require('../utils/s
 
 exports.getWalletData = (req, res) => {
     const familyId = req.user.family_id;
+    const currentUserId = req.user.id;
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
     const monthStr = new Date().toISOString().slice(0, 7); // YYYY-MM
 
     // 1. Pegar o saldo total das contas (apenas para o card do topo)
-    const queryAccounts = `SELECT current_balance, type FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`;
-    
+    // member_id vai junto pro mesmo rateio por usuário que a Home já faz: conta
+    // com dono específico só conta pra esse dono; conta compartilhada ("Casa",
+    // sem member_id) divide igualmente entre os membros da família. Sem isso,
+    // "Saldo Total" respondia coisas diferentes em cada tela pra mesma pergunta
+    // — aqui era o total da família inteira, na Home era só a parte do usuário.
+    const queryAccounts = `SELECT current_balance, type, member_id FROM accounts WHERE family_id = ? AND type != 'INVESTMENT'`;
+
     db.all(queryAccounts, [familyId], (err, accounts) => {
         if (err) return res.status(500).json({ error: 'Erro interno' });
-        
-        let totalBalance = 0;
-        accounts.forEach(acc => {
-            if (acc.type !== 'CREDIT') {
-                totalBalance += acc.current_balance;
-            }
-        });
+
+        db.get(`SELECT COUNT(*) as count FROM members WHERE family_id = ?`, [familyId], (errCount, countRow) => {
+            if (errCount) return res.status(500).json({ error: 'Erro interno' });
+            const familyMemberCount = countRow?.count || 1;
+
+            let totalBalance = 0;
+            accounts.forEach(acc => {
+                if (acc.type === 'CREDIT') return;
+                if (acc.member_id) {
+                    if (acc.member_id === currentUserId) {
+                        totalBalance += acc.current_balance;
+                    }
+                } else {
+                    totalBalance += acc.current_balance / familyMemberCount;
+                }
+            });
 
         // 2. Buscar todos os membros
         db.all(`SELECT id, name, avatar_url, COALESCE(monthly_income, 0) as total_income FROM members WHERE family_id = ?`, [familyId], (err, members) => {
@@ -189,6 +204,7 @@ exports.getWalletData = (req, res) => {
                 });
             });
         });
+        }); // fecha o db.get do familyMemberCount
     });
 };
 

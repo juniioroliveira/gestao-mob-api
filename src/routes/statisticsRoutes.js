@@ -5,6 +5,7 @@ const authenticateToken = require('../middlewares/authMiddleware');
 const requireAdmin = require('../middlewares/requireAdmin');
 
 router.get('/', authenticateToken, statisticsController.getStatisticsData);
+router.get('/monthly-overview', authenticateToken, statisticsController.getMonthlyOverview);
 router.get('/categories/:id/suggested-percent', authenticateToken, statisticsController.getSuggestedCategoryPercent);
 // Gerenciar categorias/limites é restrito a administradores da família.
 router.post('/categories', authenticateToken, requireAdmin, statisticsController.createCategory);

@@ -465,3 +465,96 @@ exports.getSuggestedCategoryPercent = async (req, res) => {
         res.status(500).json({ error: 'Erro interno no servidor' });
     }
 };
+
+const MONTH_ABBR_PT = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+
+// Visão mensal por quinzena: "Saídas" (despesas soltas + o que ainda falta pagar
+// de contas a pagar daquela quinzena) contra "Receitas". Duas fontes deliberadas
+// pra "Saídas", sem sobrepor uma na outra:
+//   - Despesas soltas: toda transação EXPENSE já lançada no mês — é dinheiro que
+//     JÁ saiu, seja de um gasto avulso ou do pagamento de uma conta a pagar.
+//   - Contas a pagar (só a parte "Pago" != true): o valor programado de contas a
+//     pagar que ainda NÃO virou transação — é o que falta sair. Reaproveita
+//     computeExpensesForMonth (mesma lógica de recorrência/parcelas da tela de
+//     Contas a Pagar) em vez de reimplementar due_day/parcelas do zero.
+// Uma conta já paga não entra aqui de novo: a transação dela já está contada em
+// "despesas soltas", então family somar de novo pelo valor programado duplicaria.
+exports.getMonthlyOverview = async (req, res) => {
+    const familyId = req.user.family_id;
+    const familyScope = req.query.scope === 'family';
+    const currentUserId = familyScope ? null : req.user.id;
+    const monthsCount = Math.min(Math.max(parseInt(req.query.months, 10) || 6, 1), 12);
+
+    const now = new Date();
+    const targetMonths = [];
+    for (let i = monthsCount - 1; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        targetMonths.push({ month: d.getMonth() + 1, year: d.getFullYear() });
+    }
+
+    try {
+        const { computeExpensesForMonth } = require('./fixedExpensesController');
+
+        const months = [];
+        for (const { month, year } of targetMonths) {
+            const monthStr = `${year}-${String(month).padStart(2, '0')}`;
+
+            // Contas a pagar dessa competência específica que ainda não viraram
+            // transação. Filtra por referenceMonth === monthStr (não só pelo mês
+            // consultado) porque computeExpensesForMonth também devolve atrasados
+            // de meses anteriores arrastados pra cá — sem esse filtro, o mesmo
+            // atraso apareceria de novo em cada mês seguinte que a gente consultasse.
+            const billOccurrences = await computeExpensesForMonth(familyId, month, year, null, currentUserId);
+            let billsQ1 = 0;
+            let billsQ2 = 0;
+            billOccurrences
+                .filter(e => e.referenceMonth === monthStr && e.status !== 'Pago')
+                .forEach(e => {
+                    const due = e.dueDay || 1;
+                    const amount = Number(e.amount) || 0;
+                    if (due <= 15) billsQ1 += amount; else billsQ2 += amount;
+                });
+
+            // Despesas e receitas já lançadas nesse mês, por quinzena.
+            const txRows = await suggestionGetQuery(
+                `SELECT t.type, t.amount, t.member_id, DAY(t.transaction_date) as day
+                 FROM transactions t
+                 JOIN accounts a ON a.id = t.account_id
+                 WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME')
+                   AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?`,
+                [familyId, monthStr]
+            );
+
+            let expenseQ1 = 0, expenseQ2 = 0, incomeQ1 = 0, incomeQ2 = 0;
+            txRows.forEach(t => {
+                if (currentUserId != null && !parseMemberIds(t.member_id).includes(currentUserId)) return;
+                const amount = Number(t.amount) || 0;
+                const isQ1 = (t.day || 1) <= 15;
+                if (t.type === 'EXPENSE') {
+                    if (isQ1) expenseQ1 += amount; else expenseQ2 += amount;
+                } else if (t.type === 'INCOME') {
+                    if (isQ1) incomeQ1 += amount; else incomeQ2 += amount;
+                }
+            });
+
+            months.push({
+                month,
+                year,
+                label: `${MONTH_ABBR_PT[month - 1]}/${year}`,
+                quinzenas: [
+                    { label: '1-15', saidas: round2(expenseQ1 + billsQ1), receitas: round2(incomeQ1) },
+                    { label: '16-fim', saidas: round2(expenseQ2 + billsQ2), receitas: round2(incomeQ2) },
+                ],
+            });
+        }
+
+        res.json({ months });
+    } catch (err) {
+        console.error('Erro ao montar visão mensal:', err);
+        res.status(500).json({ error: 'Erro interno no servidor' });
+    }
+};
+
+function round2(n) {
+    return Math.round((n + Number.EPSILON) * 100) / 100;
+}
