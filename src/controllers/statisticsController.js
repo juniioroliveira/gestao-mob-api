@@ -534,7 +534,7 @@ exports.getMonthlyOverview = async (req, res) => {
                 .forEach(e => {
                     const due = e.dueDay || 1;
                     const amount = Number(e.amount) || 0;
-                    if (due <= 15) billsQ1 += amount; else billsQ2 += amount;
+                    if (due <= 14) billsQ1 += amount; else billsQ2 += amount;
                 });
 
             // Despesas e receitas já lançadas nesse mês, por quinzena.
@@ -547,17 +547,24 @@ exports.getMonthlyOverview = async (req, res) => {
                 [familyId, monthStr]
             );
 
-            let expenseQ1 = 0, expenseQ2 = 0, incomeQ1 = 0, incomeQ2 = 0;
+            // Cada lado (saídas/receitas) fica separado em duas partes desde já —
+            // não só a soma — pra tela poder mostrar a barra dividida: despesas
+            // soltas x contas a pagar, salário x demais receitas.
+            let expenseQ1 = 0, expenseQ2 = 0, salaryTxQ1 = 0, salaryTxQ2 = 0, otherIncomeQ1 = 0, otherIncomeQ2 = 0;
             let hasSalaryTx = false;
             txRows.forEach(t => {
                 if (currentUserId != null && !parseMemberIds(t.member_id).includes(currentUserId)) return;
                 const amount = Number(t.amount) || 0;
-                const isQ1 = (t.day || 1) <= 15;
+                const isQ1 = (t.day || 1) <= 14;
                 if (t.type === 'EXPENSE') {
                     if (isQ1) expenseQ1 += amount; else expenseQ2 += amount;
                 } else if (t.type === 'INCOME') {
-                    if (isQ1) incomeQ1 += amount; else incomeQ2 += amount;
-                    if (t.is_salary) hasSalaryTx = true;
+                    if (t.is_salary) {
+                        hasSalaryTx = true;
+                        if (isQ1) salaryTxQ1 += amount; else salaryTxQ2 += amount;
+                    } else {
+                        if (isQ1) otherIncomeQ1 += amount; else otherIncomeQ2 += amount;
+                    }
                 }
             });
 
@@ -565,6 +572,8 @@ exports.getMonthlyOverview = async (req, res) => {
             // pra qualquer mês futuro, e também um mês passado onde ninguém marcou
             // ainda) — projeta a partir do perfil, respeitando adiantamento e
             // salário como dois eventos em dias diferentes, cada um na sua quinzena.
+            // Vai pro lado "salário" da barra, nunca em "outras receitas".
+            let salaryQ1 = salaryTxQ1, salaryQ2 = salaryTxQ2;
             if (!hasSalaryTx && salaryProfile && Number(salaryProfile.monthly_income) > 0) {
                 const monthlyIncome = Number(salaryProfile.monthly_income) || 0;
                 const advanceValue = Number(salaryProfile.advance_value) || 0;
@@ -572,13 +581,13 @@ exports.getMonthlyOverview = async (req, res) => {
                 const advanceDay = salaryProfile.advance_day || null;
 
                 if (advanceDay && advanceValue > 0) {
-                    if (advanceDay <= 15) incomeQ1 += advanceValue; else incomeQ2 += advanceValue;
+                    if (advanceDay <= 14) salaryQ1 += advanceValue; else salaryQ2 += advanceValue;
                     const remainder = monthlyIncome - advanceValue;
                     const remainderDay = salaryDay || advanceDay;
-                    if (remainderDay <= 15) incomeQ1 += remainder; else incomeQ2 += remainder;
+                    if (remainderDay <= 14) salaryQ1 += remainder; else salaryQ2 += remainder;
                 } else {
                     const day = salaryDay || 5;
-                    if (day <= 15) incomeQ1 += monthlyIncome; else incomeQ2 += monthlyIncome;
+                    if (day <= 14) salaryQ1 += monthlyIncome; else salaryQ2 += monthlyIncome;
                 }
             }
 
@@ -587,8 +596,24 @@ exports.getMonthlyOverview = async (req, res) => {
                 year,
                 label: `${MONTH_ABBR_PT[month - 1]}/${year}`,
                 quinzenas: [
-                    { label: '1-15', saidas: round2(expenseQ1 + billsQ1), receitas: round2(incomeQ1) },
-                    { label: '16-fim', saidas: round2(expenseQ2 + billsQ2), receitas: round2(incomeQ2) },
+                    {
+                        label: '1-14',
+                        saidas: round2(expenseQ1 + billsQ1),
+                        despesasSoltas: round2(expenseQ1),
+                        contasAPagar: round2(billsQ1),
+                        receitas: round2(salaryQ1 + otherIncomeQ1),
+                        salario: round2(salaryQ1),
+                        outrasReceitas: round2(otherIncomeQ1),
+                    },
+                    {
+                        label: '15-fim',
+                        saidas: round2(expenseQ2 + billsQ2),
+                        despesasSoltas: round2(expenseQ2),
+                        contasAPagar: round2(billsQ2),
+                        receitas: round2(salaryQ2 + otherIncomeQ2),
+                        salario: round2(salaryQ2),
+                        outrasReceitas: round2(otherIncomeQ2),
+                    },
                 ],
             });
         }
