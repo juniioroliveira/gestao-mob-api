@@ -468,6 +468,27 @@ exports.getSuggestedCategoryPercent = async (req, res) => {
 
 const MONTH_ABBR_PT = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 
+// O último dia útil do mês já pertence ao ciclo da quinzena 1 do mês seguinte
+// (é quando cai o salário que financia ela, e é quando um boleto com
+// vencimento em fim de semana de fato processa) — não à quinzena 2 do mês
+// corrente. Por isso a quinzena 2 "própria" vai só até o PENÚLTIMO dia útil;
+// dali pro fim do mês, conta a pagar entra no mês seguinte. Considera só
+// fim de semana (sem calendário de feriados nacionais).
+function isWeekend(year, month, day) {
+    const dow = new Date(year, month - 1, day).getDay();
+    return dow === 0 || dow === 6;
+}
+function lastWeekdayOfMonth(year, month) {
+    let d = new Date(year, month, 0).getDate(); // último dia do mês
+    while (isWeekend(year, month, d)) d--;
+    return d;
+}
+function secondLastWeekdayOfMonth(year, month) {
+    let d = lastWeekdayOfMonth(year, month) - 1;
+    while (isWeekend(year, month, d)) d--;
+    return d;
+}
+
 // Visão mensal por quinzena, seguindo o CICLO real de pagamento, não só o
 // calendário cru:
 //   - Receitas da quinzena 1 (dia 1-14): entram aqui as receitas lançadas
@@ -549,8 +570,12 @@ exports.getMonthlyOverview = async (req, res) => {
                 .filter(e => e.referenceMonth === ref && e.status !== 'Pago' && dueFilter(e.dueDay || 1))
                 .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
 
+            const q2Cutoff = secondLastWeekdayOfMonth(year, month);
             const billsQ1Own = unpaidSum(monthStr, d => d <= 14);
-            const billsQ2Own = unpaidSum(monthStr, d => d > 14);
+            // Só até o penúltimo dia útil é "desta" quinzena 2 — do último dia
+            // útil em diante (inclui fim de semana antes dele) já é o próximo
+            // ciclo, e entra na quinzena 1 do mês seguinte via carryIntoQ1 de lá.
+            const billsQ2Own = unpaidSum(monthStr, d => d > 14 && d <= q2Cutoff);
             const carryIntoQ1 = unpaidSum(prevMonthStr, d => d > 14);
             const carryIntoQ2 = billsQ1Own;
             const billsQ1 = billsQ1Own + carryIntoQ1;
@@ -826,9 +851,17 @@ exports.getMonthlyOverviewDetail = async (req, res) => {
             quinzena,
             tag,
         });
+        const q2Cutoff = secondLastWeekdayOfMonth(year, month);
         billOccurrences
             .filter(e => e.referenceMonth === monthStr && e.status !== 'Pago')
-            .forEach(e => addBill(e, (e.dueDay || 1) <= 14 ? 1 : 2, 'propria_quinzena'));
+            .forEach(e => {
+                const due = e.dueDay || 1;
+                if (due <= 14) return addBill(e, 1, 'propria_quinzena');
+                if (due <= q2Cutoff) return addBill(e, 2, 'propria_quinzena');
+                // Do último dia útil do mês em diante (inclui fim de semana antes
+                // dele) já é o ciclo da quinzena 1 do mês seguinte, não desta.
+                addBill(e, 2, 'conta_desloca_proximo_mes');
+            });
         billOccurrences
             .filter(e => e.referenceMonth === prevMonthStr && e.status !== 'Pago' && (e.dueDay || 1) > 14)
             .forEach(e => addBill(e, 1, 'atrasada_ciclo_anterior'));
