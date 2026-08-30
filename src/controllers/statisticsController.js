@@ -588,7 +588,7 @@ exports.getMonthlyOverview = async (req, res) => {
             // abaixo. Contando os dois, um Uber de R$20 no crédito aparecia como
             // despesa solta JÁ E TAMBÉM dentro da fatura do mês — dobrado.
             const txRows = await suggestionGetQuery(
-                `SELECT t.type, t.amount, t.member_id, t.is_salary, DAY(t.transaction_date) as day
+                `SELECT t.type, t.amount, t.member_id, t.is_salary, t.recurring_bill_id, DAY(t.transaction_date) as day
                  FROM transactions t
                  JOIN accounts a ON a.id = t.account_id
                  WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME') AND a.is_credit != 1
@@ -600,6 +600,7 @@ exports.getMonthlyOverview = async (req, res) => {
             // não só a soma — pra tela poder mostrar a barra dividida: despesas
             // soltas x contas a pagar, salário x demais receitas.
             let expenseQ1 = 0, expenseQ2 = 0, salaryTxQ1 = 0, salaryTxQ2 = 0, otherIncomeQ1 = 0, otherIncomeQ2 = 0;
+            let paidBillQ1 = 0, paidBillQ2 = 0;
             let hasAdvanceTx = false, hasSalaryTxOwn = false;
             txRows.forEach(t => {
                 if (currentUserId != null && !parseMemberIds(t.member_id).includes(currentUserId)) return;
@@ -607,7 +608,16 @@ exports.getMonthlyOverview = async (req, res) => {
                 const day = t.day || 1;
                 const isQ1 = day <= 14;
                 if (t.type === 'EXPENSE') {
-                    if (isQ1) expenseQ1 += amount; else expenseQ2 += amount;
+                    // Despesa vinculada a uma conta a pagar é o pagamento de uma
+                    // conta, não gasto solto — mesmo já paga, ela pesa em "contas a
+                    // pagar" na barra, não em "despesas" (mesmo critério da lista).
+                    if (t.recurring_bill_id) {
+                        if (isQ1) paidBillQ1 += amount; else paidBillQ2 += amount;
+                    } else if (isQ1) {
+                        expenseQ1 += amount;
+                    } else {
+                        expenseQ2 += amount;
+                    }
                 } else if (t.type === 'INCOME') {
                     if (t.is_salary) {
                         if (currentUserId != null) {
@@ -697,18 +707,18 @@ exports.getMonthlyOverview = async (req, res) => {
                 quinzenas: [
                     {
                         label: '1-14',
-                        saidas: round2(expenseQ1 + billsQ1),
+                        saidas: round2(expenseQ1 + billsQ1 + paidBillQ1),
                         despesasSoltas: round2(expenseQ1),
-                        contasAPagar: round2(billsQ1),
+                        contasAPagar: round2(billsQ1 + paidBillQ1),
                         receitas: round2(salaryQ1 + otherIncomeQ1),
                         salario: round2(salaryQ1),
                         outrasReceitas: round2(otherIncomeQ1),
                     },
                     {
                         label: '15-fim',
-                        saidas: round2(expenseQ2 + billsQ2),
+                        saidas: round2(expenseQ2 + billsQ2 + paidBillQ2),
                         despesasSoltas: round2(expenseQ2),
-                        contasAPagar: round2(billsQ2),
+                        contasAPagar: round2(billsQ2 + paidBillQ2),
                         receitas: round2(salaryQ2 + otherIncomeQ2),
                         salario: round2(salaryQ2),
                         outrasReceitas: round2(otherIncomeQ2),
