@@ -834,7 +834,14 @@ exports.getMonthlyOverviewDetail = async (req, res) => {
                 addTx(row, 1, 'salario');
                 return;
             }
-            addTx(row, isQ1 ? 1 : 2, row.type === 'INCOME' ? 'outra_receita' : 'despesa');
+            // Despesa vinculada a uma conta a pagar (recurring_bill_id) é o
+            // pagamento de uma conta, não gasto solto — mesmo já paga, quem
+            // filtra "só contas a pagar" espera ver ela lá, não em "despesas".
+            let tag = 'outra_receita';
+            if (row.type !== 'INCOME') {
+                tag = row.recurring_bill_id ? 'despesa_conta_paga' : 'despesa';
+            }
+            addTx(row, isQ1 ? 1 : 2, tag);
         });
 
         shiftedRows.forEach(row => {
