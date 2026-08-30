@@ -581,12 +581,17 @@ exports.getMonthlyOverview = async (req, res) => {
             const billsQ1 = billsQ1Own + carryIntoQ1;
             const billsQ2 = billsQ2Own + carryIntoQ2;
 
-            // Despesas e receitas já lançadas nesse mês, por quinzena.
+            // Despesas e receitas já lançadas nesse mês, por quinzena. Cartão de
+            // crédito fica de fora daqui — não é dinheiro que já saiu da conta,
+            // vira dívida que só é cobrada quando a fatura fecha, e essa fatura já
+            // entra como conta a pagar (billOccurrences, tipo CREDIT_INVOICE) mais
+            // abaixo. Contando os dois, um Uber de R$20 no crédito aparecia como
+            // despesa solta JÁ E TAMBÉM dentro da fatura do mês — dobrado.
             const txRows = await suggestionGetQuery(
                 `SELECT t.type, t.amount, t.member_id, t.is_salary, DAY(t.transaction_date) as day
                  FROM transactions t
                  JOIN accounts a ON a.id = t.account_id
-                 WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME')
+                 WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME') AND a.is_credit != 1
                    AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?`,
                 [familyId, monthStr]
             );
@@ -767,7 +772,7 @@ exports.getMonthlyOverviewDetail = async (req, res) => {
              FROM transactions t
              JOIN accounts a ON a.id = t.account_id
              LEFT JOIN categories c ON c.id = t.category_id
-             WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME')
+             WHERE a.family_id = ? AND t.type IN ('EXPENSE', 'INCOME') AND a.is_credit != 1
                AND DATE_FORMAT(t.transaction_date, '%Y-%m') = ?
              ORDER BY t.transaction_date ASC, t.id ASC`,
             [familyId, monthStr]

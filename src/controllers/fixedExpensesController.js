@@ -528,6 +528,10 @@ async function computeExpensesForMonth(familyId, month, year, filterType, curren
                         rawAmount: spent,
                         dueDate: card.due_day ? `Dia ${card.due_day}` : 'S/ Data',
                         dueDay: card.due_day || 31,
+                        // Sem isso, quem filtra por competência exata (ex: Visão
+                        // Mensal por quinzena) descarta a fatura inteira por engano
+                        // — ela nunca teve isso preenchido antes.
+                        referenceMonth: targetMonthStr,
                         isActive: true,
                         categoryId: null,
                         categoryName: 'Cartão de Crédito',
