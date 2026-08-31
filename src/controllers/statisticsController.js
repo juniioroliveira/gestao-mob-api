@@ -555,10 +555,7 @@ exports.getMonthlyOverview = async (req, res) => {
             return 'salary';
         }
 
-        // Calcula os dois lados de UM mês (as duas quinzenas) — extraído pra
-        // função porque agora precisa rodar tanto pros meses pedidos quanto,
-        // por baixo dos panos, pros meses anteriores só pra acumular o saldo
-        // (ver mais abaixo).
+        // Calcula os dois lados de UM mês (as duas quinzenas).
         async function computeMonthQuinzenas(month, year) {
             const monthStr = `${year}-${String(month).padStart(2, '0')}`;
             const prevDate = new Date(year, month - 2, 1);
@@ -730,49 +727,9 @@ exports.getMonthlyOverview = async (req, res) => {
             };
         }
 
-        // Saldo anterior: quanto sobrou (ou faltou) das quinzenas de TRÁS pra
-        // cá, acumulado desde o primeiro lançamento que existe — não só um
-        // passo pra trás. Pra isso, recalcula (por baixo dos panos, sem
-        // devolver pro cliente) todo mês entre o mais antigo já lançado e o
-        // início da janela pedida, só pra chegar no valor acumulado certo no
-        // ponto em que a janela começa.
-        const earliestRow = await suggestionGetOne(
-            `SELECT MIN(t.transaction_date) as minDate
-             FROM transactions t JOIN accounts a ON a.id = t.account_id
-             WHERE a.family_id = ?`,
-            [familyId]
-        );
-        const catchUpMonths = [];
-        if (earliestRow?.minDate && targetMonths.length > 0) {
-            const minD = new Date(earliestRow.minDate);
-            let cy = minD.getFullYear();
-            let cm = minD.getMonth() + 1;
-            const firstTarget = targetMonths[0];
-            while (cy < firstTarget.year || (cy === firstTarget.year && cm < firstTarget.month)) {
-                catchUpMonths.push({ month: cm, year: cy });
-                cm++;
-                if (cm > 12) { cm = 1; cy++; }
-                if (catchUpMonths.length > 240) break; // trava de segurança
-            }
-        }
-
-        let runningSaldo = 0;
-        for (const { month, year } of catchUpMonths) {
-            const m = await computeMonthQuinzenas(month, year);
-            for (const q of m.quinzenas) {
-                runningSaldo += q.receitas - q.saidas;
-            }
-        }
-
         const months = [];
         for (const { month, year } of targetMonths) {
-            const m = await computeMonthQuinzenas(month, year);
-            m.quinzenas = m.quinzenas.map(q => {
-                const saldoAnterior = round2(runningSaldo);
-                runningSaldo += q.receitas - q.saidas;
-                return { ...q, saldoAnterior };
-            });
-            months.push(m);
+            months.push(await computeMonthQuinzenas(month, year));
         }
 
         res.json({ months });
