@@ -55,12 +55,10 @@ function createApp({
       hits.set(key, hit);
     }
     if (++hit.count > 30)
-      return res
-        .status(429)
-        .json({
-          error: "rate_limited",
-          message: "Aguarde alguns minutos para tentar novamente.",
-        });
+      return res.status(429).json({
+        error: "rate_limited",
+        message: "Aguarde alguns minutos para tentar novamente.",
+      });
     next();
   };
   const safeUser = (u) => ({ id: u.id, email: u.email, name: u.name });
@@ -90,12 +88,10 @@ function createApp({
         !b.name.trim() ||
         b.name.length > 100
       )
-        return res
-          .status(400)
-          .json({
-            error: "invalid_credentials",
-            message: "Informe nome, e-mail válido e senha de 12 a 72 bytes.",
-          });
+        return res.status(400).json({
+          error: "invalid_credentials",
+          message: "Informe nome, e-mail válido e senha de 12 a 72 bytes.",
+        });
       if (
         registrationKey &&
         !crypto.timingSafeEqual(
@@ -106,12 +102,10 @@ function createApp({
           crypto.createHash("sha256").update(registrationKey).digest(),
         )
       )
-        return res
-          .status(403)
-          .json({
-            error: "registration_closed",
-            message: "Informe a chave de cadastro do servidor.",
-          });
+        return res.status(403).json({
+          error: "registration_closed",
+          message: "Informe a chave de cadastro do servidor.",
+        });
       const u = await store.createUser(
         b.email.trim().toLowerCase(),
         b.name.trim(),
@@ -120,12 +114,10 @@ function createApp({
       res.status(201).json(session(u));
     } catch (e) {
       if (e.code === "ER_DUP_ENTRY")
-        return res
-          .status(409)
-          .json({
-            error: "email_unavailable",
-            message: "Não foi possível cadastrar este e-mail.",
-          });
+        return res.status(409).json({
+          error: "email_unavailable",
+          message: "Não foi possível cadastrar este e-mail.",
+        });
       next(e);
     }
   });
@@ -133,12 +125,10 @@ function createApp({
     try {
       const b = req.body;
       if (!credentials(b))
-        return res
-          .status(401)
-          .json({
-            error: "invalid_credentials",
-            message: "E-mail ou senha inválidos.",
-          });
+        return res.status(401).json({
+          error: "invalid_credentials",
+          message: "E-mail ou senha inválidos.",
+        });
       const u = await store.findUser(b.email.trim().toLowerCase());
       const valid = await bcrypt.compare(
         b.password,
@@ -147,38 +137,48 @@ function createApp({
           : "$2b$12$C6UzMDM.H6dfI/f/IKcEe.5T9tJP7FYQ5kLfZsJrD5KcJQ1kBF8kK",
       );
       if (!u || !valid)
-        return res
-          .status(401)
-          .json({
-            error: "invalid_credentials",
-            message: "E-mail ou senha inválidos.",
-          });
+        return res.status(401).json({
+          error: "invalid_credentials",
+          message: "E-mail ou senha inválidos.",
+        });
       res.json(session(u));
     } catch (e) {
       next(e);
     }
   });
-  const auth = (req, res, next) => {
-    try {
-      const header = req.headers.authorization || "";
-      if (!header.startsWith("Bearer ")) throw Error();
-      const t = jwt.verify(header.slice(7), secret, {
-        algorithms: ["HS256"],
-        issuer: "minha-carteira-api",
-        audience: "minha-carteira",
-      });
-      if (typeof t.sub !== "string") throw Error();
-      req.userId = t.sub;
-      next();
-    } catch {
+  const auth = async (req, res, next) => {
+    let subject;
+    const unauthorized = () =>
       res
         .status(401)
         .json({
           error: "unauthorized",
           message: "Entre novamente na sua conta.",
         });
+    try {
+      const header = req.headers.authorization || "";
+      if (!header.startsWith("Bearer ")) return unauthorized();
+      const claims = jwt.verify(header.slice(7), secret, {
+        algorithms: ["HS256"],
+        issuer: "minha-carteira-api",
+        audience: "minha-carteira",
+      });
+      if (typeof claims.sub !== "string") return unauthorized();
+      subject = claims.sub;
+    } catch {
+      return unauthorized();
+    }
+    try {
+      const user = await store.findUserById(subject);
+      if (!user) return unauthorized();
+      req.userId = subject;
+      req.user = safeUser(user);
+      next();
+    } catch (error) {
+      next(error);
     }
   };
+  app.get("/api/v1/auth/me", auth, (req, res) => res.json({ user: req.user }));
   app.get("/api/v1/ledger", auth, async (req, res, next) => {
     try {
       res.json(await store.read(req.userId));
@@ -199,12 +199,10 @@ function createApp({
         ) ||
         !validState(b.state)
       )
-        return res
-          .status(400)
-          .json({
-            error: "invalid_snapshot",
-            message: "Os dados enviados são inválidos.",
-          });
+        return res.status(400).json({
+          error: "invalid_snapshot",
+          message: "Os dados enviados são inválidos.",
+        });
       const hash = crypto
         .createHash("sha256")
         .update(
@@ -224,12 +222,10 @@ function createApp({
     if (err instanceof SyntaxError && err.status === 400)
       return res.status(400).json({ error: "invalid_json" });
     console.error("request_failed", err.code || err.name);
-    res
-      .status(500)
-      .json({
-        error: "server_error",
-        message: "Não foi possível concluir a solicitação.",
-      });
+    res.status(500).json({
+      error: "server_error",
+      message: "Não foi possível concluir a solicitação.",
+    });
   });
   return app;
 }

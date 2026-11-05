@@ -84,6 +84,36 @@ test(
       401,
     );
     const token = a.body.token;
+    const me = await request("/api/v1/auth/me", "GET", undefined, token);
+    assert.equal(me.status, 200);
+    assert.deepEqual(me.body.user, a.body.user);
+    assert.equal((await request("/api/v1/auth/me")).status, 401);
+    const removed = await store.createUser(
+      "removed@example.com",
+      "Removed",
+      "unused",
+    );
+    const removedToken = require("jsonwebtoken").sign(
+      {},
+      "test-secret-that-is-long-enough-for-jwt",
+      {
+        subject: removed.id,
+        issuer: "minha-carteira-api",
+        audience: "minha-carteira",
+        expiresIn: "1h",
+      },
+    );
+    await store.pool.execute("DELETE FROM wallet_users WHERE id=?", [
+      removed.id,
+    ]);
+    assert.equal(
+      (await request("/api/v1/auth/me", "GET", undefined, removedToken)).status,
+      401,
+    );
+    assert.equal(
+      (await request("/api/v1/ledger", "GET", undefined, removedToken)).status,
+      401,
+    );
     const jwt = require("jsonwebtoken");
     const expired = jwt.sign({}, "test-secret-that-is-long-enough-for-jwt", {
       subject: a.body.user.id,

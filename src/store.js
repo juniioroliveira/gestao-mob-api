@@ -42,6 +42,13 @@ class MysqlStore {
     );
     return r[0];
   }
+  async findUserById(id) {
+    const [rows] = await this.pool.execute(
+      "SELECT id,email,name FROM wallet_users WHERE id=?",
+      [id],
+    );
+    return rows[0];
+  }
   async createUser(email, name, passwordHash) {
     const id = crypto.randomUUID();
     await this.pool.execute(
