@@ -221,3 +221,10 @@ test(
     assert.equal((await request("/api/auth/debug-db")).status, 404);
   },
 );
+
+test("Revenue snapshots retain backward compatibility and reject invalid containers", () => {
+  assert.equal(validState(state), true);
+  assert.equal(validState({...state, revenues: []}), true);
+  assert.equal(validState({...state, revenues: "invalid"}), false);
+  assert.equal(validState({...state, revenues: [{id:"r",due:"invalid",amount:50}]}), false);
+});

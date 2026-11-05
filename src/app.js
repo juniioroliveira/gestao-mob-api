@@ -255,7 +255,7 @@ function validState(s) {
     )
   )
     return false;
-  for (const key of ["incomePlans", "statementCredits", "statementImports"])
+  for (const key of ["incomePlans", "statementCredits", "statementImports", "revenues"])
     if (s[key] !== undefined && !Array.isArray(s[key])) return false;
   const money = new Set([
     "amount",
@@ -268,9 +268,10 @@ function validState(s) {
     "tax",
     "baseAmount",
     "estimatedAmount",
+    "expectedAmount",
     "actual",
   ]);
-  const dates = new Set(["due", "date", "paidAt", "receivedAt", "closedAt"]);
+  const dates = new Set(["due", "date", "paidAt", "receivedAt", "receivedOn", "closedAt"]);
   function check(v, depth = 0) {
     if (depth > 30) return false;
     if (v === null) return true;
