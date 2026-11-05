@@ -1,27 +1,22 @@
 {
-  "name": "gestao-mob-backend",
-  "version": "1.0.0",
-  "description": "Servidor Backend para o app Gestão Mob",
+  "name": "minha-carteira-api",
+  "version": "2.0.0",
+  "description": "API privada de sincronização Minha Carteira",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "build": "git add -A && git diff --cached --quiet || (git commit -m \"chore: auto-commit changes\" && git push origin main)",
-    "verify-deploy": "node scripts/verify-deploy.js"
+    "build": "node --check src/index.js && node --check src/app.js && node --check src/store.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@google/genai": "^2.15.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.2.0",
-    "mysql2": "^3.22.3",
-    "socket.io": "^4.7.5",
-    "sqlite3": "^5.1.7"
+    "mysql2": "^3.22.3"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+  "overrides": {
+    "qs": "^6.17.1"
   }
 }
